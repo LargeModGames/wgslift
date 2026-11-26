@@ -3,6 +3,8 @@
 mod body;
 mod entry;
 mod names;
+#[cfg(test)]
+mod tests;
 mod uniforms;
 
 use std::fmt::Write;
