@@ -632,7 +632,7 @@ fn modf(cx: &mut dyn Lowerer, args: Vec<IntrinsicArg>, span: Span) -> Option<Exp
     let (x, ip) = (args.next().unwrap(), args.next().unwrap());
     let place = out_place(cx, "modf", &ip)?;
     let x = float_input(cx, "modf", x, span)?;
-    let x = share(cx, x);
+    let x = cx.temp(x);
     let whole = cx.temp(call("trunc", vec![x.clone()], x.ty.clone()));
     let stored = cx.coerce(whole.clone(), &ip.value.ty, ip.span);
     cx.emit(Stmt::Assign(place, stored));
@@ -652,7 +652,7 @@ fn sincos(cx: &mut dyn Lowerer, args: Vec<IntrinsicArg>, span: Span) -> Option<E
     let cos_place = out_place(cx, "sincos", &c);
     let (sin_place, cos_place) = (sin_place?, cos_place?);
     let x = float_input(cx, "sincos", x, span)?;
-    let x = share(cx, x);
+    let x = cx.temp(x);
     for (wgsl, place, out) in [("sin", sin_place, s), ("cos", cos_place, c)] {
         let value = call(wgsl, vec![x.clone()], x.ty.clone());
         let value = cx.coerce(value, &out.value.ty, out.span);
@@ -1545,14 +1545,20 @@ mod tests {
         let Lowered::Done(result) = lower(&mut cx, "modf", args, span()) else {
             panic!("modf failed: {:?}", cx.errors);
         };
-        let whole = local(TEMP, float(2));
-        let init = Some(call("trunc", vec![x.clone()], float(2)));
+        // x is copied first: the out place can be x itself.
+        let copy = local(TEMP, float(2));
+        let whole = local(TEMP + 1, float(2));
+        let init = Some(call("trunc", vec![copy.clone()], float(2)));
         let expected = [
-            Stmt::Local { id: TEMP, init },
+            Stmt::Local {
+                id: TEMP,
+                init: Some(x),
+            },
+            Stmt::Local { id: TEMP + 1, init },
             Stmt::Assign(place(1), whole.clone()),
         ];
         assert_eq!(cx.stmts, expected);
-        assert_eq!(result, binary(BinaryOp::Sub, x, whole, float(2)));
+        assert_eq!(result, binary(BinaryOp::Sub, copy, whole, float(2)));
     }
 
     #[test]
@@ -1564,9 +1570,14 @@ mod tests {
             lower(&mut cx, "sincos", args, span()),
             Lowered::Done(void())
         );
+        let copy = local(TEMP, Type::FLOAT);
         let expected = [
-            Stmt::Assign(place(1), call("sin", vec![x.clone()], Type::FLOAT)),
-            Stmt::Assign(place(2), call("cos", vec![x], Type::FLOAT)),
+            Stmt::Local {
+                id: TEMP,
+                init: Some(x),
+            },
+            Stmt::Assign(place(1), call("sin", vec![copy.clone()], Type::FLOAT)),
+            Stmt::Assign(place(2), call("cos", vec![copy], Type::FLOAT)),
         ];
         assert_eq!(cx.stmts, expected);
     }

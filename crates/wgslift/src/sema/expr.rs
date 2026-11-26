@@ -172,8 +172,15 @@ impl Analyzer<'_> {
     /// Keeps `value` for more than one use: a simple value as it is, anything else
     /// in a new local.
     pub fn reuse(&mut self, value: Expr) -> Expr {
-        let simple = matches!(value.kind, ExprKind::Literal(_) | ExprKind::Var(_));
-        if simple || !self.in_function() {
+        if matches!(value.kind, ExprKind::Var(_)) {
+            return value;
+        }
+        self.snapshot(value)
+    }
+
+    /// Keeps the current `value` in a new local, so later stores cannot change it.
+    pub fn snapshot(&mut self, value: Expr) -> Expr {
+        if matches!(value.kind, ExprKind::Literal(_)) || !self.in_function() {
             return value;
         }
         let ty = value.ty.clone();
@@ -582,7 +589,7 @@ impl Analyzer<'_> {
                 }
                 let post = matches!(op, AstUnary::PostInc | AstUnary::PostDec);
                 let old = if post && want_value {
-                    self.reuse(old)
+                    self.snapshot(old)
                 } else {
                     old
                 };
@@ -1235,7 +1242,7 @@ impl Analyzer<'_> {
                 self.emit_stmt(Stmt::Assign(place, value), span);
             }
             Some(sw) => {
-                let value = self.reuse(value);
+                let value = self.snapshot(value);
                 let scalar = value.ty.scalar().unwrap_or(Scalar::Float);
                 for (k, &c) in sw.iter().enumerate() {
                     let mut place = t.place.clone();
@@ -1430,19 +1437,7 @@ impl Lowerer for Analyzer<'_> {
     }
 
     fn temp(&mut self, value: Expr) -> Expr {
-        if !self.in_function() {
-            return value;
-        }
-        let ty = value.ty.clone();
-        let id = self.new_local("", ty.clone());
-        self.state().pre.push(Stmt::Local {
-            id,
-            init: Some(value),
-        });
-        Expr {
-            kind: ExprKind::Var(Root::Local(id)),
-            ty,
-        }
+        self.snapshot(value)
     }
 
     fn emit(&mut self, stmt: Stmt) {

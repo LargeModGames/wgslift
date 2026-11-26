@@ -304,3 +304,70 @@ fn a_matrix_truncates_to_its_first_element_as_a_scalar() {
     assert!(module.is_some(), "{d:?}");
     assert!(d.iter().any(|d| d.message.contains("truncation")));
 }
+
+/// True when `e` reads `root` anywhere.
+fn reads(e: &crate::ir::Expr, root: Root) -> bool {
+    let mut found = false;
+    super::visit_expr(e, &mut |x| {
+        if matches!(x.kind, ExprKind::Var(r) if r == root) {
+            found = true;
+        }
+    });
+    found
+}
+
+#[test]
+fn a_swizzle_store_from_its_own_target_reads_the_old_value() {
+    let m =
+        ok("float4 main() : COLOR { float3 r = float3(1, 2, 3); r.zyx = r; return float4(r, 1); }");
+    let parts: Vec<_> = entry_body(&m)
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::Assign(p, e) if p.path.len() == 1 => Some(e),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(parts.len(), 3);
+    assert!(parts.iter().all(|e| !reads(e, Root::Local(0))), "{parts:?}");
+}
+
+#[test]
+fn a_post_increment_gives_the_value_before_the_update() {
+    let m = ok("int main() : COLOR { int i = 0; int j = i++; return j; }");
+    let body = entry_body(&m);
+    let assign = body
+        .iter()
+        .position(|s| matches!(s, Stmt::Assign(p, _) if p.root == Root::Local(0)))
+        .unwrap();
+    let Some(Stmt::Local { init: Some(j), .. }) = body.get(assign + 1) else {
+        panic!("{body:?}")
+    };
+    assert!(!reads(j, Root::Local(0)), "{body:?}");
+}
+
+#[test]
+fn modf_and_sincos_read_the_input_before_they_store_into_it() {
+    let m = ok(
+        "float main() : COLOR { float a = 3.7; float f = modf(a, a); float b = 1; float c; sincos(b, b, c); return f + c; }",
+    );
+    let body = entry_body(&m);
+    let fraction = body
+        .iter()
+        .find_map(|s| match s {
+            Stmt::Local { init: Some(e), .. } if matches!(e.kind, ExprKind::Binary(..)) => Some(e),
+            _ => None,
+        })
+        .unwrap();
+    // a is local 0 and b is local 4; the calls write both.
+    assert!(!reads(fraction, Root::Local(0)), "{body:?}");
+    let cos = body
+        .iter()
+        .find_map(|s| match s {
+            Stmt::Assign(_, e) if matches!(&e.kind, ExprKind::Builtin(n, _) if *n == "cos") => {
+                Some(e)
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert!(!reads(cos, Root::Local(4)), "{body:?}");
+}
