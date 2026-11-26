@@ -7,18 +7,35 @@ into WGSL for `wgpu` and WebGPU.
 
 ## Status
 
-Early development. Nothing is published yet.
+Early development. Nothing is published on crates.io yet.
 
-The front end (`wgslift-syntax`) works: the preprocessor, the lexer and the parser.
-It parses 15,892 of the 15,895 shaders in a large MilkDrop preset collection. The 3
-that fail are not valid HLSL. Translation to WGSL comes next.
+- `wgslift-syntax`: the preprocessor, the lexer and the parser.
+- `wgslift`: type checking, the HLSL intrinsics, and a WGSL writer with a reflection
+  of the uniform buffer, the textures and the entry point.
+
+Direct3D 9 pixel shaders translate today. Of the 15,895 shaders in a large MilkDrop
+preset collection, 15,892 translate to WGSL that both naga and Tint accept. The 3
+that fail are not valid HLSL. Vertex shaders and later shader models come next.
 
 ```rust
-let parsed = wgslift_syntax::parse("main.hlsl", "float4 tint : register(c0);", Default::default());
-for diagnostic in &parsed.diagnostics {
-    eprintln!("{}", diagnostic.display(&parsed.files));
+let options = wgslift::Options {
+    entry_point: "main".to_string(),
+    ..Default::default()
+};
+let source = "sampler2D tex;\nfloat4 main(float2 uv : TEXCOORD0) : COLOR0 { return tex2D(tex, uv); }";
+match wgslift::translate("main.hlsl", source, options) {
+    Ok(output) => println!("{}", output.wgsl),
+    Err(failed) => {
+        for diagnostic in &failed.diagnostics {
+            eprintln!("{}", diagnostic.display(&failed.files));
+        }
+    }
 }
 ```
+
+`Dialect::d3d9_legacy()` (the default) follows the Direct3D 9 compiler: for example,
+`pow`, `log` and `sqrt` use the absolute value of their input, and a shader may write
+to a uniform.
 
 wgslift is not affiliated with Microsoft. HLSL is used here only to name the language
 that wgslift reads.
