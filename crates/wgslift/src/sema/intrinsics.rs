@@ -29,6 +29,14 @@ pub(crate) fn lower(
             ("log10", 1) => log10(cx, args, span),
             ("sign", 1) => sign(cx, args, span),
             ("dot", 2) => dot(cx, args, span),
+            // A scalar normalizes to x / |x|, which is its sign.
+            ("normalize", 1) if args[0].value.ty.size() == Some(1) => {
+                let x = cx.coerce(args[0].value.clone(), &Type::FLOAT, span);
+                Some(Expr {
+                    kind: ExprKind::Builtin("sign", vec![x]),
+                    ty: Type::FLOAT,
+                })
+            }
             ("length", 1) | ("distance", 2) | ("normalize", 1) | ("reflect", 2) => {
                 geometric(cx, name, args, span)
             }
@@ -1332,7 +1340,10 @@ mod tests {
             times(s.clone(), t)
         );
         assert!(cx.errors.is_empty());
-        failed(&mut cx, "normalize", vec![s]);
+        assert_eq!(
+            done(&mut cx, "normalize", vec![s.clone()]),
+            call("sign", vec![s], Type::FLOAT)
+        );
         let mut cx = Mock::legacy();
         failed(&mut cx, "length", vec![local(0, mat(3, 3))]);
     }
