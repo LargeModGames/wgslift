@@ -5,6 +5,7 @@
 
 pub mod diagnostic;
 pub mod lexer;
+pub mod pp;
 pub mod span;
 
 pub use diagnostic::{Diagnostic, Severity};
