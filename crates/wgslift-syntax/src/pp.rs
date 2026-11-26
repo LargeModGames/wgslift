@@ -4,15 +4,20 @@
 //! expanded as `M` again, so recursive macros stop.
 
 use std::collections::{HashMap, VecDeque};
+use std::rc::Rc;
 
 use crate::diagnostic::Diagnostic;
 use crate::lexer::{Punct, Token, TokenKind, lex};
 use crate::span::{FileId, SourceFiles, Span};
 
-/// The most tokens one preprocessor run can produce.
-pub const MAX_TOKENS: usize = 1 << 20;
+/// The most macro expansion work one preprocessor run may do. One unit is one
+/// expansion, one copied argument token, one stringified or pasted byte, or one
+/// hide-set entry. This bounds the time and memory of expansion.
+pub const MAX_EXPANSION_WORK: usize = 1 << 22;
 /// The deepest nesting of `#include` files.
 pub const MAX_INCLUDE_DEPTH: usize = 32;
+/// The most files one run may include, counting a file each time it is included.
+pub const MAX_INCLUDES: usize = 4096;
 /// The deepest nesting of macro arguments that are expanded inside other arguments.
 const MAX_EXPANSION_DEPTH: usize = 64;
 
@@ -38,10 +43,13 @@ impl IncludeResolver for NoIncludes {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct Macro {
-    params: Option<Vec<String>>,
+    /// The number of parameters of a function-like macro; `None` for object-like.
+    params: Option<usize>,
     body: Vec<Token>,
+    /// For each body token, the index of the parameter it names.
+    body_params: Vec<Option<usize>>,
 }
 
 #[derive(Debug, Clone)]
@@ -87,8 +95,9 @@ pub fn preprocess(
         out: Vec::new(),
         diagnostics,
         include_depth: 0,
+        included: 0,
         expansion_depth: 0,
-        produced: 0,
+        work: 0,
         over_budget: false,
     };
     for (name, value) in defines {
@@ -103,19 +112,39 @@ pub fn preprocess(
 struct Preprocessor<'a> {
     files: &'a mut SourceFiles,
     includes: &'a mut dyn IncludeResolver,
-    macros: HashMap<String, Macro>,
+    macros: HashMap<String, Rc<Macro>>,
     ids: HashMap<String, u32>,
     out: Vec<Token>,
     diagnostics: &'a mut Vec<Diagnostic>,
     include_depth: usize,
+    /// Files included so far, counting repeats.
+    included: usize,
     expansion_depth: usize,
-    produced: usize,
+    work: usize,
     over_budget: bool,
 }
 
 impl Preprocessor<'_> {
     fn error(&mut self, span: Span, message: impl Into<String>) {
         self.diagnostics.push(Diagnostic::error(span, message));
+    }
+
+    /// Charges `units` of expansion work. Returns false when the budget is used up;
+    /// the first time, it reports an error.
+    fn spend(&mut self, units: usize, site: Span) -> bool {
+        if self.over_budget {
+            return false;
+        }
+        self.work = self.work.saturating_add(units);
+        if self.work > MAX_EXPANSION_WORK {
+            self.over_budget = true;
+            self.error(
+                site,
+                format!("macro expansion needs more than {MAX_EXPANSION_WORK} steps"),
+            );
+            return false;
+        }
+        true
     }
 
     fn run_file(&mut self, file: FileId) {
@@ -285,10 +314,29 @@ impl Preprocessor<'_> {
             self.error(span, "`##` cannot be at the start or end of a macro");
             return;
         }
+        let mut index = HashMap::new();
+        for (i, p) in params.iter().flatten().enumerate() {
+            if index.insert(p.as_str(), i).is_some() {
+                self.error(span, format!("the parameter `{p}` is named twice"));
+                return;
+            }
+        }
+        let body_params = body
+            .iter()
+            .map(|t| {
+                (t.kind == TokenKind::Ident)
+                    .then(|| index.get(t.text.as_str()).copied())
+                    .flatten()
+            })
+            .collect();
         let next_id = self.ids.len() as u32;
         self.ids.entry(name.text.clone()).or_insert(next_id);
-        self.macros
-            .insert(name.text.clone(), Macro { params, body });
+        let mac = Macro {
+            params: params.map(|p| p.len()),
+            body,
+            body_params,
+        };
+        self.macros.insert(name.text.clone(), Rc::new(mac));
     }
 
     fn include(&mut self, rest: &[Token], span: Span) {
@@ -324,6 +372,14 @@ impl Preprocessor<'_> {
             );
             return;
         }
+        if self.included >= MAX_INCLUDES {
+            if self.included == MAX_INCLUDES {
+                self.included += 1;
+                self.error(span, format!("more than {MAX_INCLUDES} files are included"));
+            }
+            return;
+        }
+        self.included += 1;
         let includer = self
             .files
             .get(span.file)
@@ -415,6 +471,12 @@ impl Preprocessor<'_> {
         let mut input: VecDeque<PpToken> = input.into();
         let mut out = Vec::new();
         while let Some(t) = input.pop_front() {
+            if self.over_budget {
+                // The error is reported: the rest passes through unexpanded.
+                out.push(t);
+                out.extend(input);
+                return out;
+            }
             let name = &t.token.text;
             let id = match (t.token.kind, self.ids.get(name)) {
                 (TokenKind::Ident, Some(id))
@@ -427,9 +489,12 @@ impl Preprocessor<'_> {
                     continue;
                 }
             };
-            let mac = self.macros[name].clone();
+            let mac = Rc::clone(&self.macros[name]);
             let site = t.token.site();
-            let (args, hide) = match &mac.params {
+            if !self.spend(1 + mac.body.len(), site) {
+                continue;
+            }
+            let (args, hide) = match mac.params {
                 None => (Vec::new(), insert(&t.hide, id)),
                 Some(params) => {
                     if !input.front().is_some_and(|n| n.token.is(Punct::LParen)) {
@@ -443,15 +508,14 @@ impl Preprocessor<'_> {
                         );
                         continue;
                     };
-                    if params.is_empty() && args.len() == 1 && args[0].is_empty() {
+                    if params == 0 && args.len() == 1 && args[0].is_empty() {
                         args.clear();
                     }
-                    if args.len() != params.len() {
+                    if args.len() != params {
                         self.error(
                             site,
                             format!(
-                                "macro `{name}` takes {} arguments, not {}",
-                                params.len(),
+                                "macro `{name}` takes {params} arguments, not {}",
                                 args.len()
                             ),
                         );
@@ -461,17 +525,6 @@ impl Preprocessor<'_> {
                 }
             };
             let body = self.substitute(&mac, &args, &hide, site);
-            self.produced += body.len();
-            if self.produced > MAX_TOKENS {
-                if !self.over_budget {
-                    self.over_budget = true;
-                    self.error(
-                        site,
-                        format!("macro expansion makes more than {MAX_TOKENS} tokens"),
-                    );
-                }
-                return out;
-            }
             for token in body.into_iter().rev() {
                 input.push_front(token);
             }
@@ -487,27 +540,26 @@ impl Preprocessor<'_> {
         hide: &[u32],
         site: Span,
     ) -> Vec<PpToken> {
-        let params = mac.params.as_deref().unwrap_or(&[]);
-        let param = |t: &Token| {
-            if t.kind == TokenKind::Ident {
-                params.iter().position(|p| *p == t.text)
-            } else {
-                None
-            }
-        };
+        let param = |i: usize| mac.body_params.get(i).copied().flatten();
         let body = &mac.body;
         let mut out: Vec<PpToken> = Vec::new();
         // The left operand of the next `##` is an empty argument.
         let mut empty_left = false;
         let mut i = 0;
         while i < body.len() {
+            if self.over_budget {
+                return out;
+            }
             let t = &body[i];
             let pasted = body.get(i + 1).is_some_and(|n| n.is(Punct::HashHash));
             let after_paste = i > 0 && body[i - 1].is(Punct::HashHash);
             if t.is(Punct::HashHash) {
                 let Some(rhs) = body.get(i + 1) else { break };
-                let rhs: Vec<PpToken> = match param(rhs) {
-                    Some(p) => args[p].clone(),
+                let rhs: Vec<PpToken> = match param(i + 1) {
+                    Some(p) => {
+                        self.spend(args[p].len(), site);
+                        args[p].clone()
+                    }
                     None => vec![PpToken::new(rhs.clone())],
                 };
                 let empty_right = rhs.is_empty();
@@ -523,13 +575,22 @@ impl Preprocessor<'_> {
             empty_left = false;
             if mac.params.is_some()
                 && t.is(Punct::Hash)
-                && let Some(p) = body.get(i + 1).and_then(param)
+                && let Some(p) = param(i + 1)
             {
-                out.push(PpToken::new(stringify(&args[p], t)));
+                let bytes = args[p].iter().map(|a| a.token.text.len() + 1).sum();
+                if self.spend(bytes, site) {
+                    out.push(PpToken::new(stringify(&args[p], t)));
+                }
                 i += 2;
                 continue;
             }
-            match param(t) {
+            let arg = param(i);
+            if let Some(p) = arg
+                && !self.spend(args[p].len(), site)
+            {
+                return out;
+            }
+            match arg {
                 Some(p) if pasted || after_paste => {
                     empty_left = args[p].is_empty();
                     out.extend(args[p].iter().cloned());
@@ -556,8 +617,11 @@ impl Preprocessor<'_> {
             }
             i += 1;
         }
-        for t in &mut out {
-            t.hide = union(&t.hide, hide);
+        let entries = out.iter().map(|t| t.hide.len() + hide.len()).sum();
+        if self.spend(entries, site) {
+            for t in &mut out {
+                t.hide = union(&t.hide, hide);
+            }
         }
         out
     }
@@ -575,6 +639,7 @@ impl Preprocessor<'_> {
             return;
         };
         let text = format!("{}{}", left.token.text, right.token.text);
+        self.spend(text.len(), site);
         let mut ignored = Vec::new();
         let relexed = lex(site.file, &text, &mut ignored);
         match relexed.as_slice() {
@@ -1085,6 +1150,55 @@ mod tests {
     }
 
     #[test]
+    fn expensive_expansions_stop_at_the_work_budget() {
+        let hides: String = (1..=30_000)
+            .map(|i| format!("#define M{i} M{} y\n", i - 1))
+            .collect();
+        let inputs = [
+            format!("#define F(x) x x\n{}1{}", "F(".repeat(40), ")".repeat(40)),
+            format!(
+                "#define S(x){}\nS({})",
+                " #x".repeat(100_000),
+                "a ".repeat(100_000)
+            ),
+            format!(
+                "#define P a{}\n{}",
+                "##a".repeat(20_000),
+                "P ".repeat(50_000)
+            ),
+            format!(
+                "#define E\n#define F(x){}\nF({})",
+                " x".repeat(200_000),
+                "E ".repeat(200_000)
+            ),
+            format!("#define M0 x\n{hides}M30000"),
+        ];
+        for text in inputs {
+            let (_, d) = run_with(&text, &mut NoIncludes);
+            assert!(
+                d.iter().any(|d| d.message.contains("more than")),
+                "{text:.50}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_macro_with_many_parameters_expands_in_linear_time() {
+        let n = 20_000;
+        let params: Vec<String> = (0..n).map(|i| format!("p{i}")).collect();
+        let text = format!(
+            "#define F({}) {}\nF({}1)",
+            params.join(","),
+            "y ".repeat(100_000),
+            ",".repeat(n - 1)
+        );
+        let (out, d) = run_with(&text, &mut NoIncludes);
+        assert!(d.is_empty(), "{d:?}");
+        assert_eq!(out.len(), "y ".repeat(100_000).len() - 1);
+        assert_eq!(errors("#define F(a, a) a").len(), 1);
+    }
+
+    #[test]
     fn deep_argument_nesting_does_not_overflow_the_stack() {
         let depth = 5_000;
         let text = format!(
@@ -1108,6 +1222,10 @@ mod tests {
             match (path, angled) {
                 ("common.h", false) => Ok((path.into(), format!("#define FROM \"{includer}\"\n"))),
                 ("loop.h", true) => Ok((path.into(), "#include <loop.h>\n".into())),
+                ("twice.h", false) => Ok((
+                    path.into(),
+                    "#include \"twice.h\"\n#include \"twice.h\"\n".into(),
+                )),
                 _ => Err(format!("no file {path}")),
             }
         }
@@ -1121,6 +1239,13 @@ mod tests {
         let (_, d) = run_with("#include <loop.h>", &mut Files);
         assert!(d.iter().any(|d| d.message.contains("nested more than")));
         assert_eq!(errors("#include \"x.h\"").len(), 1);
+        // A header that includes itself twice would open 2^32 files.
+        let (_, d) = run_with("#include \"twice.h\"", &mut Files);
+        let count = d
+            .iter()
+            .filter(|d| d.message.contains("files are included"))
+            .count();
+        assert_eq!(count, 1, "{:?}", d.len());
     }
 
     #[test]
