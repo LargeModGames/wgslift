@@ -14,7 +14,7 @@ pub const MAX_TOKENS: usize = 1 << 20;
 /// The deepest nesting of `#include` files.
 pub const MAX_INCLUDE_DEPTH: usize = 32;
 /// The deepest nesting of macro arguments that are expanded inside other arguments.
-const MAX_EXPANSION_DEPTH: usize = 200;
+const MAX_EXPANSION_DEPTH: usize = 64;
 
 /// Finds the text of a file that `#include` names.
 pub trait IncludeResolver {
