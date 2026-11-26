@@ -3,10 +3,10 @@
 use std::collections::HashMap;
 
 use wgslift_syntax::Span;
-use wgslift_syntax::ast::{self, StmtKind as K};
+use wgslift_syntax::ast::{self, Modifier, StmtKind as K};
 
-use super::{Analyzer, R};
-use crate::ir::{Block, Expr, ExprKind, Stmt, UnaryOp};
+use super::{Analyzer, R, is_const_expr};
+use crate::ir::{self, Block, Expr, ExprKind, Root, Space, Stmt, UnaryOp};
 use crate::types::Type;
 
 impl Analyzer<'_> {
@@ -241,12 +241,37 @@ impl Analyzer<'_> {
         if matches!(base, Type::Sampler(_)) {
             return Err(self.error(v.span, "local samplers are not supported"));
         }
+        // A `static` local keeps its value between calls: it is a private global.
+        let is_static =
+            v.modifiers.contains(&Modifier::Static) && !v.modifiers.contains(&Modifier::Const);
         for d in &v.declarators {
             let ty = self.array_type(base.clone(), &d.array, d.span)?;
             let init = match &d.init {
                 Some(init) => Some(self.initializer(init, &ty, d.span)?),
                 None => None,
             };
+            if is_static {
+                if init
+                    .as_ref()
+                    .is_some_and(|v| !is_const_expr(v, &self.module.globals))
+                {
+                    return Err(
+                        self.error(d.span, "the value of a `static` local must be a constant")
+                    );
+                }
+                let g = self.module.globals.len();
+                self.module.globals.push(ir::Global {
+                    name: d.name.name.clone(),
+                    ty,
+                    space: Space::Private,
+                    init,
+                    entry_init: None,
+                    span: d.span,
+                });
+                let scope = self.state().scopes.last_mut().expect("one scope at least");
+                scope.insert(d.name.name.clone(), Root::Global(g));
+                continue;
+            }
             let id = self.new_local(&d.name.name, ty);
             out.extend(self.take_pre());
             out.push(Stmt::Local { id, init });

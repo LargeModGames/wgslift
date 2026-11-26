@@ -387,6 +387,20 @@ fn a_for_loop_variable_stays_visible_after_the_loop() {
 }
 
 #[test]
+fn a_static_local_keeps_its_value_between_calls() {
+    let m = ok("float count() { static float n = 0; n += 1; return n; }\n\
+         float main() : COLOR { float a = count(); return a + count(); }");
+    let n = m
+        .globals
+        .iter()
+        .position(|g| g.name == "n")
+        .expect("a global");
+    assert_eq!(m.globals[n].space, Space::Private);
+    let count = m.functions.iter().find(|f| f.name == "count").unwrap();
+    assert!(count.locals.is_empty(), "{:?}", count.locals);
+}
+
+#[test]
 fn a_constant_integer_with_a_leading_zero_is_octal() {
     let m = ok("static float a[010];\nfloat main() : COLOR { return a[0]; }");
     assert_eq!(m.globals[0].ty, Type::Array(Box::new(Type::FLOAT), 8));

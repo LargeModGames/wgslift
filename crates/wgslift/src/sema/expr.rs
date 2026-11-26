@@ -574,7 +574,8 @@ impl Analyzer<'_> {
     }
 
     fn ident(&mut self, name: &str, span: Span) -> R<Expr> {
-        if let Some(id) = self.lookup_local(name) {
+        let scoped = self.lookup_scoped(name);
+        if let Some(Root::Local(id)) = scoped {
             let ty = self.func.as_ref().expect("in a function").locals[id]
                 .ty
                 .clone();
@@ -583,7 +584,11 @@ impl Analyzer<'_> {
                 ty,
             });
         }
-        if let Some(&g) = self.globals.get(name) {
+        let global = match scoped {
+            Some(Root::Global(g)) => Some(g),
+            _ => self.globals.get(name).copied(),
+        };
+        if let Some(g) = global {
             return Ok(Expr {
                 kind: ExprKind::Var(Root::Global(g)),
                 ty: self.module.globals[g].ty.clone(),
@@ -1071,7 +1076,12 @@ impl Analyzer<'_> {
     pub fn place(&mut self, e: &ast::Expr) -> R<Target> {
         let target = match &e.kind {
             K::Ident(name) => {
-                if let Some(id) = self.lookup_local(name) {
+                let scoped = self.lookup_scoped(name);
+                let global = match scoped {
+                    Some(Root::Global(g)) => Some(g),
+                    _ => self.globals.get(name).copied(),
+                };
+                if let Some(Root::Local(id)) = scoped {
                     let state = self.state();
                     state.locals[id].written = true;
                     Target {
@@ -1082,7 +1092,7 @@ impl Analyzer<'_> {
                         ty: state.locals[id].ty.clone(),
                         swizzle: None,
                     }
-                } else if let Some(&g) = self.globals.get(name) {
+                } else if let Some(g) = global {
                     let global = &self.module.globals[g];
                     if global.space != Space::Private {
                         return Err(self.error(e.span, format!("`{name}` cannot be written")));
@@ -1280,7 +1290,7 @@ impl Analyzer<'_> {
         let K::Ident(name) = &callee.kind else {
             return Err(self.error(callee.span, "methods and indirect calls are not supported"));
         };
-        if self.lookup_local(name).is_some() || self.globals.contains_key(name) {
+        if self.lookup_scoped(name).is_some() || self.globals.contains_key(name) {
             return Err(self.error(
                 callee.span,
                 format!("`{name}` is a variable, not a function"),

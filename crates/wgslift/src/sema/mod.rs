@@ -153,7 +153,7 @@ pub(crate) struct SigParam {
 pub(crate) struct FnState {
     pub locals: Vec<ir::Local>,
     /// Name scopes, innermost last.
-    pub scopes: Vec<HashMap<String, usize>>,
+    pub scopes: Vec<HashMap<String, Root>>,
     /// Statements to insert before the current statement.
     pub pre: Vec<Stmt>,
     pub ret: Type,
@@ -645,7 +645,7 @@ impl Analyzer<'_> {
                 ty: p.ty.clone(),
                 written: false,
             });
-            state.scopes[0].insert(name, local);
+            state.scopes[0].insert(name, Root::Local(local));
             params.push(ir::Param {
                 local,
                 dir: p.dir,
@@ -709,12 +709,14 @@ impl Analyzer<'_> {
                 .scopes
                 .last_mut()
                 .expect("one scope at least")
-                .insert(name.to_string(), id);
+                .insert(name.to_string(), Root::Local(id));
         }
         id
     }
 
-    pub fn lookup_local(&self, name: &str) -> Option<usize> {
+    /// What `name` names in the scopes of the current function: a local, or the
+    /// private global of a `static` local.
+    pub fn lookup_scoped(&self, name: &str) -> Option<Root> {
         let state = self.func.as_ref()?;
         state.scopes.iter().rev().find_map(|s| s.get(name).copied())
     }
