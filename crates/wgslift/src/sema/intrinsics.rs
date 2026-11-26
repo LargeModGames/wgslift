@@ -52,8 +52,32 @@ pub(crate) fn lower(
         }
     };
     match result {
+        Some(expr) if name == "clamp" => Lowered::Done(clamp_as_min_max(expr)),
         Some(expr) => Lowered::Done(expr),
         None => Lowered::Failed,
+    }
+}
+
+/// HLSL's `clamp(x, low, high)` is `min(max(x, low), high)`, also when `low` is
+/// above `high`. WGSL rejects a constant `clamp` with `low` above `high`.
+fn clamp_as_min_max(e: Expr) -> Expr {
+    match e.kind {
+        ExprKind::Builtin("clamp", args) if args.len() == 3 => {
+            let [x, low, high]: [Expr; 3] = args.try_into().expect("three arguments");
+            let max = Expr {
+                kind: ExprKind::Builtin("max", vec![x, low]),
+                ty: e.ty.clone(),
+            };
+            Expr {
+                kind: ExprKind::Builtin("min", vec![max, high]),
+                ty: e.ty,
+            }
+        }
+        ExprKind::Construct(parts) => Expr {
+            kind: ExprKind::Construct(parts.into_iter().map(clamp_as_min_max).collect()),
+            ty: e.ty,
+        },
+        kind => Expr { kind, ty: e.ty },
     }
 }
 
@@ -1097,12 +1121,17 @@ mod tests {
             let expected = call(name, vec![a.clone(), b.clone()], float(3));
             assert_eq!(done(&mut cx, name, vec![a.clone(), b.clone()]), expected);
         }
-        for name in ["smoothstep", "clamp"] {
-            let mut cx = Mock::modern();
-            let args = vec![a.clone(), b.clone(), c.clone()];
-            let expected = call(name, args.clone(), float(3));
-            assert_eq!(done(&mut cx, name, args), expected);
-        }
+        let mut cx = Mock::modern();
+        let args = vec![a.clone(), b.clone(), c.clone()];
+        let expected = call("smoothstep", args.clone(), float(3));
+        assert_eq!(done(&mut cx, "smoothstep", args.clone()), expected);
+        let expected = min_max(a.clone(), b.clone(), c.clone(), float(3));
+        assert_eq!(done(&mut cx, "clamp", args), expected);
+    }
+
+    /// HLSL's clamp: `min(max(x, low), high)`.
+    fn min_max(x: Expr, low: Expr, high: Expr, ty: Type) -> Expr {
+        call("min", vec![call("max", vec![x, low], ty.clone()), high], ty)
     }
 
     #[test]
@@ -1166,12 +1195,12 @@ mod tests {
 
         let (lo, hi) = (Expr::float(0.0), Expr::float(1.0));
         let row = |i| {
-            let parts = vec![
+            min_max(
                 column(m.clone(), i, 3),
                 splat(lo.clone(), &float(3)),
                 splat(hi.clone(), &float(3)),
-            ];
-            call("clamp", parts, float(3))
+                float(3),
+            )
         };
         let expected = construct(vec![row(0), row(1)], mat(2, 3));
         assert_eq!(
