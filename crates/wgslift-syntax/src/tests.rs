@@ -461,3 +461,68 @@ fn the_deepest_accepted_nesting_fits_a_small_stack() {
         .join()
         .unwrap();
 }
+
+#[test]
+fn errors_in_a_switch_keep_the_other_cases_and_the_function() {
+    let text = "void f() { switch (k) { case 1 x = 1; break; case 2: y = 2; break; } z = 3; }\nfloat4 g() : COLOR { return 1; }";
+    let parsed = parse("t.hlsl", text, Options::default());
+    assert_eq!(parsed.diagnostics.len(), 1, "{:?}", parsed.diagnostics);
+    assert_eq!(parsed.unit.items.len(), 2);
+    let Item::Function(f) = &parsed.unit.items[0] else {
+        panic!()
+    };
+    let stmts = &f.body.as_ref().unwrap().stmts;
+    assert_eq!(stmts.len(), 2);
+    let StmtKind::Switch { cases, .. } = &stmts[0].kind else {
+        panic!()
+    };
+    assert_eq!(cases.len(), 2);
+    assert_eq!(cases[1].stmts.len(), 2);
+
+    let text = "void f() { switch (k) { case 0: x = 1 case 1: y = 2; break; } }";
+    let parsed = parse("t.hlsl", text, Options::default());
+    assert_eq!(parsed.diagnostics.len(), 1, "{:?}", parsed.diagnostics);
+    let Item::Function(f) = &parsed.unit.items[0] else {
+        panic!()
+    };
+    let StmtKind::Switch { cases, .. } = &f.body.as_ref().unwrap().stmts[0].kind else {
+        panic!()
+    };
+    assert_eq!(cases.len(), 2);
+    assert_eq!(cases[1].stmts.len(), 2);
+}
+
+#[test]
+fn errors_in_struct_buffer_and_sampler_bodies_stay_inside_the_body() {
+    let cases = [
+        (
+            "struct S { float4 pos : SV_Position float2 uv; float3 n; };\nfloat4 main() : COLOR { return 0; }",
+            1,
+        ),
+        ("cbuffer B { float a b; float c; };\nfloat x;", 1),
+        (
+            "sampler s = sampler_state { Texture = ; MinFilter = Linear; };\nfloat x;",
+            1,
+        ),
+    ];
+    for (text, members) in cases {
+        let parsed = parse("t.hlsl", text, Options::default());
+        assert_eq!(
+            parsed.diagnostics.len(),
+            1,
+            "{text}: {:?}",
+            parsed.diagnostics
+        );
+        assert_eq!(parsed.unit.items.len(), 2, "{text}");
+        let kept = match &parsed.unit.items[0] {
+            Item::Struct(s) => s.fields.len(),
+            Item::Buffer(b) => b.members.len(),
+            Item::Variable(v) => match &v.declarators[0].init {
+                Some(Initializer::SamplerState(states, _)) => states.len(),
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(kept, members, "{text}");
+    }
+}

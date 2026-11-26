@@ -286,8 +286,20 @@ impl Parser<'_> {
     /// Skips to the end of the statement or item: past a `;` or a `{}` block. In a
     /// block, a `}` that closes the block stays for the block.
     fn recover(&mut self, in_block: bool) {
+        self.skip(in_block, false);
+    }
+
+    /// Like `recover` in a block, but also stops before a `case` or `default` label.
+    fn recover_in_switch(&mut self) {
+        self.skip(true, true);
+    }
+
+    fn skip(&mut self, in_block: bool, stop_at_labels: bool) {
         let mut depth = 0usize;
         while let Some(t) = self.peek() {
+            if stop_at_labels && depth == 0 && (t.is_word("case") || t.is_word("default")) {
+                return;
+            }
             if t.is(Punct::LBrace) {
                 depth += 1;
             } else if t.is(Punct::RBrace) {
@@ -511,18 +523,39 @@ impl Parser<'_> {
         let name = self.ident()?;
         self.types.insert(name.name.clone());
         self.expect(Punct::LBrace)?;
-        let mut fields = Vec::new();
-        while !self.eat(Punct::RBrace) {
-            if self.peek().is_none() {
-                return Err(self.expected("`}`"));
-            }
-            fields.push(self.var_decl()?);
-        }
+        let fields = self.members()?;
         Ok(StructDef {
             name,
             fields,
             span: self.since(start),
         })
+    }
+
+    /// Runs `item` for each entry of a `{}` body after the `{`, through the `}`.
+    /// After an error it goes on at the next entry.
+    fn body_list<T>(&mut self, mut item: impl FnMut(&mut Self) -> PResult<T>) -> PResult<Vec<T>> {
+        let mut list = Vec::new();
+        while !self.eat(Punct::RBrace) {
+            if self.peek().is_none() {
+                return Err(self.expected("`}`"));
+            }
+            let before = self.pos;
+            match item(self) {
+                Ok(entry) => list.push(entry),
+                Err(Stop) => {
+                    self.recover(true);
+                    if self.pos == before && !self.at(Punct::RBrace) {
+                        self.pos += 1;
+                    }
+                }
+            }
+        }
+        Ok(list)
+    }
+
+    /// The declarations of a struct or buffer body, through the `}`.
+    fn members(&mut self) -> PResult<Vec<VarDecl>> {
+        self.body_list(Self::var_decl)
     }
 
     fn typedef(&mut self) -> PResult<Typedef> {
@@ -560,13 +593,7 @@ impl Parser<'_> {
         let name = self.ident()?;
         let bindings = self.bindings()?;
         self.expect(Punct::LBrace)?;
-        let mut members = Vec::new();
-        while !self.eat(Punct::RBrace) {
-            if self.peek().is_none() {
-                return Err(self.expected("`}`"));
-            }
-            members.push(self.var_decl()?);
-        }
+        let members = self.members()?;
         self.eat(Punct::Semi);
         Ok(BufferBlock {
             kind,
@@ -801,34 +828,36 @@ impl Parser<'_> {
             }
             if p.eat_word("sampler_state") {
                 p.expect(Punct::LBrace)?;
-                let mut states = Vec::new();
-                while !p.eat(Punct::RBrace) {
-                    let name = p.word()?;
-                    p.expect(Punct::Eq)?;
-                    let value = if p.at(Punct::Lt) {
-                        let open = p.here();
-                        p.pos += 1;
-                        let texture = p.ident()?;
-                        if !p.eat_gt() {
-                            return Err(p.expected("`>`"));
-                        }
-                        Expr {
-                            kind: ExprKind::Ident(texture.name),
-                            span: p.since(open),
-                        }
-                    } else {
-                        p.assign()?
-                    };
-                    p.expect(Punct::Semi)?;
-                    states.push(StateAssignment {
-                        span: p.since(name.span),
-                        name,
-                        value,
-                    });
-                }
+                let states = p.body_list(Self::state_assignment)?;
                 return Ok(Initializer::SamplerState(states, p.since(start)));
             }
             Ok(Initializer::Expr(p.assign()?))
+        })
+    }
+
+    /// `Name = value;` in a sampler state block.
+    fn state_assignment(&mut self) -> PResult<StateAssignment> {
+        let name = self.word()?;
+        self.expect(Punct::Eq)?;
+        let value = if self.at(Punct::Lt) {
+            let open = self.here();
+            self.pos += 1;
+            let texture = self.ident()?;
+            if !self.eat_gt() {
+                return Err(self.expected("`>`"));
+            }
+            Expr {
+                kind: ExprKind::Ident(texture.name),
+                span: self.since(open),
+            }
+        } else {
+            self.assign()?
+        };
+        self.expect(Punct::Semi)?;
+        Ok(StateAssignment {
+            span: self.since(name.span),
+            name,
+            value,
         })
     }
 
@@ -1016,45 +1045,56 @@ impl Parser<'_> {
             if self.peek().is_none() {
                 return Err(self.expected("`}`"));
             }
+            let before = self.pos;
             if self.at_word("case") || self.at_word("default") {
                 let start = self.here();
                 let mut labels = Vec::new();
-                while self.at_word("case") || self.at_word("default") {
-                    if self.eat_word("case") {
-                        labels.push(Some(self.ternary()?));
-                    } else {
-                        self.pos += 1;
-                        labels.push(None);
-                    }
-                    self.expect(Punct::Colon)?;
-                }
+                let parsed = self.labels(&mut labels);
+                // A case with a bad label stays, so that its statements have a place.
                 cases.push(SwitchCase {
                     labels,
                     stmts: Vec::new(),
                     span: self.since(start),
                 });
+                if parsed.is_err() {
+                    self.recover_in_switch();
+                }
                 continue;
             }
-            if cases.is_empty() {
-                return Err(self.expected("`case` or `default`"));
-            }
-            let before = self.pos;
-            let stmt = self.stmt();
-            let case = cases.last_mut().expect("checked above");
+            let stmt = match cases.last() {
+                Some(_) => self.stmt(),
+                None => Err(self.expected("`case` or `default`")),
+            };
             match stmt {
                 Ok(stmt) => {
+                    let case = cases.last_mut().expect("checked above");
                     case.span = case.span.to(stmt.span);
                     case.stmts.push(stmt);
                 }
                 Err(Stop) => {
-                    self.recover(true);
-                    if self.pos == before {
+                    self.recover_in_switch();
+                    let at_label = self.at_word("case") || self.at_word("default");
+                    if self.pos == before && !self.at(Punct::RBrace) && !at_label {
                         self.pos += 1;
                     }
                 }
             }
         }
         Ok(StmtKind::Switch { value, cases })
+    }
+
+    /// One or more `case value:` and `default:` labels.
+    fn labels(&mut self, labels: &mut Vec<Option<Expr>>) -> PResult<()> {
+        while self.at_word("case") || self.at_word("default") {
+            if self.eat_word("case") {
+                labels.push(Some(self.ternary()?));
+            } else {
+                self.pos += 1;
+                labels.push(None);
+            }
+            self.expect(Punct::Colon)?;
+        }
+        Ok(())
     }
 
     // Expressions. Each function that returns an expression leaves the depth of
