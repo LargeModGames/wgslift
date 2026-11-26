@@ -135,6 +135,23 @@ fn with_shape(scalar: Scalar, shape: Shape) -> Type {
     }
 }
 
+/// The rank of passing `arg` to a parameter of type `param`: an exact match, a
+/// component conversion, a splat, then a truncation. `None` when it does not convert.
+fn conversion_cost(arg: &Type, param: &Type) -> Option<u32> {
+    if arg == param {
+        return Some(0);
+    }
+    let (a, p) = (shape(arg)?, shape(param)?);
+    match (a, p) {
+        _ if a == p => Some(1),
+        (Shape::Scalar, _) => Some(2),
+        (_, Shape::Scalar) => Some(3),
+        (Shape::Vector(n), Shape::Vector(m)) if n > m => Some(3),
+        (Shape::Matrix(r1, c1), Shape::Matrix(r2, c2)) if r1 >= r2 && c1 >= c2 => Some(3),
+        _ => None,
+    }
+}
+
 /// The common shape of two operands: a scalar takes the other shape, and two
 /// vectors or two matrices truncate to the smaller one.
 fn common_shape(a: Shape, b: Shape) -> Option<Shape> {
@@ -1299,6 +1316,22 @@ impl Analyzer<'_> {
         }
     }
 
+    /// The types of `args`, with no statements, locals or messages left behind.
+    fn arg_types(&mut self, args: &[ast::Expr]) -> R<Vec<Type>> {
+        let marks = self.func.as_ref().map(|s| (s.pre.len(), s.locals.len()));
+        let messages = self.diagnostics.len();
+        let types: R<Vec<Type>> = args.iter().map(|a| self.expr(a).map(|v| v.ty)).collect();
+        if let Some((pre, locals)) = marks {
+            let state = self.state();
+            state.pre.truncate(pre);
+            state.locals.truncate(locals);
+        }
+        if types.is_ok() {
+            self.diagnostics.truncate(messages);
+        }
+        types
+    }
+
     fn user_call(
         &mut self,
         name: &str,
@@ -1321,22 +1354,38 @@ impl Analyzer<'_> {
             }
             [one] => *one,
             many => {
-                // Pick the overload whose parameter types match the most arguments.
-                let mut types = Vec::new();
-                for a in args {
-                    types.push(self.expr(a)?.ty);
-                }
-                *many
+                let types = self.arg_types(args)?;
+                let costs: Vec<Option<Vec<u32>>> = many
                     .iter()
-                    .max_by_key(|&&f| {
-                        self.signatures[f]
-                            .params
+                    .map(|&f| {
+                        let params = &self.signatures[f].params;
+                        params
                             .iter()
                             .zip(&types)
-                            .filter(|(p, t)| p.ty == **t)
-                            .count()
+                            .map(|(p, t)| conversion_cost(t, &p.ty))
+                            .collect()
                     })
-                    .expect("not empty")
+                    .collect();
+                // The best overload is no worse than every other one on each argument.
+                let no_worse = |a: &[u32], b: &[u32]| a.iter().zip(b).all(|(x, y)| x <= y);
+                let best: Vec<usize> = (0..many.len())
+                    .filter(|&i| {
+                        costs[i].as_ref().is_some_and(|ci| {
+                            costs.iter().enumerate().all(|(j, cj)| {
+                                j == i || cj.as_ref().is_none_or(|cj| no_worse(ci, cj))
+                            })
+                        })
+                    })
+                    .collect();
+                match best.as_slice() {
+                    [i] => many[*i],
+                    [] if costs.iter().all(Option::is_none) => {
+                        return Err(
+                            self.error(span, format!("no `{name}` takes arguments of these types"))
+                        );
+                    }
+                    _ => return Err(self.error(span, format!("the call to `{name}` is ambiguous"))),
+                }
             }
         };
         if !self.has_body(index) {

@@ -346,6 +346,36 @@ fn a_post_increment_gives_the_value_before_the_update() {
 }
 
 #[test]
+fn an_overloaded_call_lowers_its_arguments_once_and_picks_the_closest_overload() {
+    let m = ok(
+        "float f(float a) { return 1; }\nfloat f(float2 a) { return 2; }\n\
+         float main() : COLOR { float i = 0; float r = f(i++); return r + f(1); }",
+    );
+    let body = entry_body(&m);
+    let increments = body
+        .iter()
+        .filter(|s| matches!(s, Stmt::Assign(p, _) if p.root == Root::Local(0)))
+        .count();
+    assert_eq!(increments, 1, "{body:?}");
+    let mut callees = Vec::new();
+    for s in body {
+        if let Stmt::Local { init: Some(e), .. } | Stmt::Return(Some(e)) = s {
+            super::visit_expr(e, &mut |x| {
+                if let ExprKind::Call(f, _) = x.kind {
+                    callees.push(f);
+                }
+            });
+        }
+    }
+    assert_eq!(callees.len(), 2);
+    for f in callees {
+        assert_eq!(m.functions[f].params.len(), 1);
+        let local = m.functions[f].params[0].local;
+        assert_eq!(m.functions[f].locals[local].ty, Type::FLOAT);
+    }
+}
+
+#[test]
 fn modf_and_sincos_read_the_input_before_they_store_into_it() {
     let m = ok(
         "float main() : COLOR { float a = 3.7; float f = modf(a, a); float b = 1; float c; sincos(b, b, c); return f + c; }",
