@@ -5,3 +5,17 @@ on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project us
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+### Added
+
+- `wgslift-syntax`: an HLSL front end with source spans on every node.
+  - A preprocessor: object-like and function-like macros with `#` and `##`,
+    `#if`/`#ifdef`/`#ifndef`/`#elif`/`#else`/`#endif`, `#undef`, `#error`, and
+    `#include` through an `IncludeResolver`. `#line` and `#pragma` are ignored.
+  - A parser for functions, global and local declarations, structs, typedefs,
+    `cbuffer`/`tbuffer` blocks, semantics, `register` and `packoffset`, annotations,
+    `sampler_state` blocks, attributes, all statements and all expressions.
+  - Error recovery: after an error the parser goes on at the next statement or item.
+  - Limits for hostile input: nesting (`MAX_DEPTH`), expression tree depth
+    (`MAX_TREE_DEPTH`), macro output (`MAX_TOKENS`) and include depth.
+- The `milkdrop_corpus` example parses every shader in a folder of MilkDrop presets.

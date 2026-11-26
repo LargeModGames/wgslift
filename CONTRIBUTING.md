@@ -33,6 +33,7 @@ Tell us the wgslift version and paste the error. Add the shader when you may sha
 | Path | What it is |
 |---|---|
 | `crates/wgslift-syntax/` | The front end: preprocessor, lexer, parser and syntax tree |
+| `crates/wgslift-syntax/examples/milkdrop_corpus.rs` | Parses every shader in a folder of MilkDrop presets that you have on your computer |
 | `.github/workflows/` | CI |
 
 ## Before you open a PR
