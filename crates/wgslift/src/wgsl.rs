@@ -1,5 +1,7 @@
 //! The WGSL printer: typed IR to WGSL text and reflection.
 
+mod names;
+
 use crate::reflection::Reflection;
 use crate::{Stage, Uniformity, ir};
 
