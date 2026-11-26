@@ -196,8 +196,12 @@ pub fn lex(file: FileId, text: &str, diagnostics: &mut Vec<Diagnostic>) -> Vec<T
                 continue;
             }
             b'/' if next == Some(b'/') => {
+                // A backslash-newline continues the comment onto the next line.
                 while i < bytes.len() && bytes[i] != b'\n' {
-                    i += 1;
+                    i += match bytes[i] {
+                        b'\\' => continuation_len(bytes, i).max(1),
+                        _ => 1,
+                    };
                 }
                 space = true;
                 continue;
@@ -406,6 +410,14 @@ mod tests {
             .map(|t| t.text.as_str())
             .collect();
         assert_eq!(starts, ["#", "B"]);
+    }
+
+    #[test]
+    fn a_continuation_extends_a_line_comment() {
+        let mut d = Vec::new();
+        let t = lex(FileId(0), "// note \\\n#define A 1\nA", &mut d);
+        let texts: Vec<_> = t.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(texts, ["A"]);
     }
 
     #[test]
