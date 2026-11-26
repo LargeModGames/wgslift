@@ -322,6 +322,19 @@ impl Analyzer<'_> {
                     ty: to_ty.clone(),
                 }
             }
+            (Type::Matrix { cols, .. }, Type::Scalar(t)) => {
+                // HLSL truncates a matrix to its first element, `_m00`.
+                warn_truncation(self, &v.ty);
+                let row = Expr {
+                    kind: ExprKind::Index(Box::new(v), Box::new(Expr::int(0))),
+                    ty: Type::Vector(Scalar::Float, cols),
+                };
+                let first = Expr {
+                    kind: ExprKind::Swizzle(Box::new(row), vec![0]),
+                    ty: Type::FLOAT,
+                };
+                self.scalar_convert(first, *t)
+            }
             (Type::Scalar(_), Type::Struct(_) | Type::Array(..)) if explicit => zero(to),
             _ => {
                 self.error(

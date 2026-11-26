@@ -297,3 +297,10 @@ fn predeclared_units_are_visible_in_the_values_of_source_globals() {
     let m = analyze(&[source.unit, extra.unit], &settings, &mut d);
     assert!(m.is_some(), "{d:?}");
 }
+
+#[test]
+fn a_matrix_truncates_to_its_first_element_as_a_scalar() {
+    let (module, d) = run("float4x3 m;\nfloat main() : COLOR { float x = 1; x -= m; return x; }");
+    assert!(module.is_some(), "{d:?}");
+    assert!(d.iter().any(|d| d.message.contains("truncation")));
+}
