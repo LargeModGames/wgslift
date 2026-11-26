@@ -17,5 +17,9 @@ wgslift-syntax = { path = "../wgslift-syntax", version = "0.0.0" }
 [dev-dependencies]
 naga = { version = "30.0.2", default-features = false, features = ["wgsl-in"] }
 
+[[example]]
+name = "milkdrop_translate"
+test = true
+
 [lints]
 workspace = true

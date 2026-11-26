@@ -5,11 +5,8 @@
 
 pub mod ir;
 pub mod reflection;
-// The analysis and the printer are stubs until their code lands.
-#[allow(dead_code)]
 mod sema;
 pub mod types;
-#[allow(dead_code)]
 mod wgsl;
 
 use std::fmt;

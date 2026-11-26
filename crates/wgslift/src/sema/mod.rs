@@ -141,7 +141,6 @@ pub(crate) struct SigParam {
     pub dir: ParamDir,
     pub semantic: Option<String>,
     pub default: Option<ast::Expr>,
-    pub span: Span,
 }
 
 /// The state of the function that is being analyzed.
@@ -370,7 +369,6 @@ impl Analyzer<'_> {
                 dir,
                 semantic: p.bindings.semantic.as_ref().map(|s| s.name.clone()),
                 default: p.default.clone(),
-                span: p.span,
             });
         }
         let name = f.name.name.clone();
