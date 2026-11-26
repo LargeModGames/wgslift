@@ -77,4 +77,4 @@ PRs that ignore the issue, delete unrelated content, or claim checks that were n
 
 ## Questions
 
-Ask in an [issue](https://github.com/LargeModGames/wgslift/issues) or in the [spotatui Discord](https://spotatui.com/discord). We are happy to help.
+Ask in [Discussions](https://github.com/LargeModGames/wgslift/discussions), or open an [issue](https://github.com/LargeModGames/wgslift/issues) for a bug. We are happy to help.
