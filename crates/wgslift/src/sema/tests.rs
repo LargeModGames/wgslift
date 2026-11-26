@@ -376,6 +376,17 @@ fn an_overloaded_call_lowers_its_arguments_once_and_picks_the_closest_overload()
 }
 
 #[test]
+fn a_for_loop_variable_stays_visible_after_the_loop() {
+    let m = ok(
+        "static float i = 7;\nfloat main() : COLOR { for (int i = 0; i < 3; i++) {} return i; }",
+    );
+    let Some(Stmt::Return(Some(r))) = entry_body(&m).last() else {
+        panic!()
+    };
+    assert!(reads(r, Root::Local(0)), "{r:?}");
+}
+
+#[test]
 fn modf_and_sincos_read_the_input_before_they_store_into_it() {
     let m = ok(
         "float main() : COLOR { float a = 3.7; float f = modf(a, a); float b = 1; float c; sincos(b, b, c); return f + c; }",

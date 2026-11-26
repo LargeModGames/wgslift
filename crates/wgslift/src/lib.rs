@@ -40,6 +40,8 @@ pub struct Dialect {
     pub abs_domain_math: bool,
     /// Global variables that the shader writes become private variables.
     pub writable_globals: bool,
+    /// A variable that a `for` initializer declares stays visible after the loop.
+    pub for_init_outer_scope: bool,
     /// The uniformity policy.
     pub uniformity: Uniformity,
 }
@@ -50,6 +52,7 @@ impl Dialect {
         Dialect {
             abs_domain_math: true,
             writable_globals: true,
+            for_init_outer_scope: true,
             uniformity: Uniformity::DirectiveOff,
         }
     }

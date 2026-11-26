@@ -77,15 +77,24 @@ impl Analyzer<'_> {
                 step,
                 body,
             } => {
-                self.state().scopes.push(HashMap::new());
+                let own_scope = !self.dialect.for_init_outer_scope;
+                if own_scope {
+                    self.state().scopes.push(HashMap::new());
+                }
                 let mut outer = Vec::new();
                 if let Some(init) = init {
                     self.stmt(init, &mut outer);
                 }
                 let result = self.loop_stmt(cond.as_ref(), step.as_ref(), body, s.span);
-                self.state().scopes.pop();
+                if own_scope {
+                    self.state().scopes.pop();
+                }
                 outer.push(result?);
-                out.push(Stmt::Block(outer));
+                if own_scope {
+                    out.push(Stmt::Block(outer));
+                } else {
+                    out.extend(outer);
+                }
             }
             K::While { cond, body } => {
                 let l = self.loop_stmt(Some(cond), None, body, s.span)?;
