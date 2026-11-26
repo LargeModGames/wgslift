@@ -587,3 +587,50 @@ fn register_spaces_and_one_register_per_profile() {
     assert_eq!(reg(2, 0), (None, "s2".into(), None));
     assert_eq!(errors("float a : register(a, b, c, d);").len(), 1);
 }
+
+#[test]
+fn a_split_double_close_belongs_to_both_type_spans() {
+    let parsed = parse(
+        "t.hlsl",
+        "Texture2D<vector<float, 4>> tex;",
+        Options::default(),
+    );
+    let Item::Variable(var) = &parsed.unit.items[0] else {
+        panic!()
+    };
+    let TypeArg::Type(inner) = &var.ty.args[0] else {
+        panic!()
+    };
+    assert_eq!(parsed.files.text(inner.span), "vector<float, 4>");
+    assert_eq!(
+        parsed.files.text(var.ty.span),
+        "Texture2D<vector<float, 4>>"
+    );
+}
+
+struct Body;
+
+impl crate::IncludeResolver for Body {
+    fn resolve(&mut self, path: &str, _: bool, _: &str) -> Result<(String, String), String> {
+        Ok((path.to_string(), "x = 1;".to_string()))
+    }
+}
+
+#[test]
+fn an_error_at_the_end_points_at_the_end_of_the_main_file() {
+    let mut resolver = Body;
+    let options = Options {
+        includes: Some(&mut resolver),
+        ..Options::default()
+    };
+    let parsed = parse("t.hlsl", "void f() {\n#include \"body.h\"\n", options);
+    let e: Vec<String> = parsed
+        .diagnostics
+        .iter()
+        .map(|d| d.display(&parsed.files).to_string())
+        .collect();
+    assert_eq!(
+        e,
+        ["t.hlsl:3:1: error: expected `}`, found the end of the input"]
+    );
+}

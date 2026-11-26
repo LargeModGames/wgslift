@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use crate::ast::*;
 use crate::diagnostic::Diagnostic;
 use crate::lexer::{Punct, Token, TokenKind};
-use crate::span::{FileId, Span};
+use crate::span::Span;
 
 /// The deepest nesting of expressions and statements the parser accepts.
 pub const MAX_DEPTH: usize = 64;
@@ -150,15 +150,13 @@ struct Stop;
 
 type PResult<T> = Result<T, Stop>;
 
-/// Parses preprocessed tokens into a syntax tree.
-pub fn parse_tokens(tokens: Vec<Token>, diagnostics: &mut Vec<Diagnostic>) -> TranslationUnit {
-    let eof = tokens.last().map_or(Span::new(FileId(0), 0, 0), |t| {
-        let site = t.site();
-        Span {
-            start: site.end,
-            ..site
-        }
-    });
+/// Parses preprocessed tokens into a syntax tree. `eof` is where an error at the end
+/// of the input points: the end of the main file.
+pub fn parse_tokens(
+    tokens: Vec<Token>,
+    eof: Span,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> TranslationUnit {
     let mut parser = Parser {
         tokens,
         pos: 0,
@@ -224,20 +222,23 @@ impl Parser<'_> {
         found
     }
 
-    /// Takes one `>`. A `>>` is split, so that `vector<vector<float, 2>>` closes twice.
-    fn eat_gt(&mut self) -> bool {
-        if self.eat(Punct::Gt) {
-            return true;
+    /// Takes one `>` and returns its span. A `>>` is split, so that
+    /// `vector<vector<float, 2>>` closes twice.
+    fn eat_gt(&mut self) -> Option<Span> {
+        if self.at(Punct::Gt) {
+            let site = self.here();
+            self.pos += 1;
+            return Some(site);
         }
-        if let Some(t) = self.tokens.get_mut(self.pos)
-            && t.is(Punct::Shr)
-        {
-            t.kind = TokenKind::Punct(Punct::Gt);
-            t.text = ">".to_string();
-            t.span.start += 1;
-            return true;
+        let t = self.tokens.get_mut(self.pos).filter(|t| t.is(Punct::Shr))?;
+        let mut first = t.site();
+        if t.expanded_from.is_none() {
+            first.end = first.start + 1;
         }
-        false
+        t.kind = TokenKind::Punct(Punct::Gt);
+        t.text = ">".to_string();
+        t.span.start += 1;
+        Some(first)
     }
 
     fn here(&self) -> Span {
@@ -374,8 +375,10 @@ impl Parser<'_> {
             self.expected("a type")
         })?;
         let mut args = Vec::new();
+        let mut span = name.span;
         if is_template_type(&name.name) && self.eat(Punct::Lt) {
-            args = self.nested(|p| {
+            let close;
+            (args, close) = self.nested(|p| {
                 let mut args = Vec::new();
                 loop {
                     if p.is_type(p.peek()) {
@@ -384,18 +387,15 @@ impl Parser<'_> {
                         // Above the comparisons and shifts, so that `>` closes the list.
                         args.push(TypeArg::Expr(p.binary(8)?));
                     }
-                    if p.eat_gt() {
-                        return Ok(args);
+                    if let Some(close) = p.eat_gt() {
+                        return Ok((args, close));
                     }
                     p.expect(Punct::Comma)?;
                 }
             })?;
+            span = span.to(close);
         }
-        Ok(TypeRef {
-            span: self.since(name.span),
-            name,
-            args,
-        })
+        Ok(TypeRef { span, name, args })
     }
 
     fn modifiers(&mut self) -> Vec<Modifier> {
@@ -871,7 +871,7 @@ impl Parser<'_> {
             let open = self.here();
             self.pos += 1;
             let texture = self.ident()?;
-            if !self.eat_gt() {
+            if self.eat_gt().is_none() {
                 return Err(self.expected("`>`"));
             }
             Expr {

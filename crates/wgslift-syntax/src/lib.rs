@@ -36,7 +36,8 @@ pub struct Options<'a> {
 pub struct Parsed {
     /// The syntax tree. After errors it holds every item that parsed.
     pub unit: TranslationUnit,
-    /// The main file and every included file, for diagnostics and spans.
+    /// The main file, every included file and one `<define NAME>` file for each
+    /// predefined macro, for diagnostics and spans.
     pub files: SourceFiles,
     /// Errors and warnings in source order of discovery.
     pub diagnostics: Vec<Diagnostic>,
@@ -69,7 +70,8 @@ pub fn parse(name: &str, text: &str, options: Options<'_>) -> Parsed {
         includes,
         &mut diagnostics,
     );
-    let unit = parser::parse_tokens(tokens, &mut diagnostics);
+    let eof = Span::new(main, text.len(), text.len());
+    let unit = parser::parse_tokens(tokens, eof, &mut diagnostics);
     Parsed {
         unit,
         files,
