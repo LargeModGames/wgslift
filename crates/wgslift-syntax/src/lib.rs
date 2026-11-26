@@ -27,6 +27,9 @@ pub use span::{FileId, SourceFile, SourceFiles, Span};
 pub struct Options<'a> {
     /// Macros defined before the source, as name and value.
     pub defines: Vec<(String, String)>,
+    /// Text that is preprocessed and parsed before the source, as the file
+    /// `<prelude>`. Its macros apply to the source.
+    pub prelude: Option<String>,
     /// Finds `#include` files. Without one, every `#include` is an error.
     pub includes: Option<&'a mut dyn IncludeResolver>,
 }
@@ -63,9 +66,14 @@ pub fn parse(name: &str, text: &str, options: Options<'_>) -> Parsed {
         Some(resolver) => resolver,
         None => &mut no_includes,
     };
-    let tokens = pp::preprocess(
+    let mut sources = Vec::new();
+    if let Some(prelude) = options.prelude {
+        sources.push(files.add("<prelude>", prelude));
+    }
+    sources.push(main);
+    let tokens = pp::preprocess_files(
         &mut files,
-        main,
+        &sources,
         &options.defines,
         includes,
         &mut diagnostics,

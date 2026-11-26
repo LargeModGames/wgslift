@@ -87,6 +87,18 @@ pub fn preprocess(
     includes: &mut dyn IncludeResolver,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Vec<Token> {
+    preprocess_files(files, &[main], defines, includes, diagnostics)
+}
+
+/// Runs the preprocessor on `sources` in order, with one macro table, and returns
+/// the tokens of all of them for the parser.
+pub fn preprocess_files(
+    files: &mut SourceFiles,
+    sources: &[FileId],
+    defines: &[(String, String)],
+    includes: &mut dyn IncludeResolver,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Vec<Token> {
     let mut pp = Preprocessor {
         files,
         includes,
@@ -105,7 +117,9 @@ pub fn preprocess(
         let file = pp.files.add(format!("<define {name}>"), text);
         pp.run_file(file);
     }
-    pp.run_file(main);
+    for &source in sources {
+        pp.run_file(source);
+    }
     pp.out
 }
 

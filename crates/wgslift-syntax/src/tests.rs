@@ -634,3 +634,18 @@ fn an_error_at_the_end_points_at_the_end_of_the_main_file() {
         ["t.hlsl:3:1: error: expected `}`, found the end of the input"]
     );
 }
+
+#[test]
+fn the_prelude_runs_first_and_its_macros_apply_to_the_source() {
+    let options = Options {
+        prelude: Some("#define q1 _qa.x\nfloat4 _qa;\n".to_string()),
+        ..Options::default()
+    };
+    let parsed = parse("t.hlsl", "float f() { return q1; }", options);
+    assert!(!parsed.has_errors(), "{:?}", parsed.diagnostics);
+    assert_eq!(parsed.unit.items.len(), 2);
+    let Item::Function(f) = &parsed.unit.items[1] else {
+        panic!()
+    };
+    assert_eq!(parsed.files.get(f.span.file).unwrap().name, "t.hlsl");
+}
