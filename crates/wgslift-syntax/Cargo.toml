@@ -1,0 +1,15 @@
+[package]
+name = "wgslift-syntax"
+description = "Preprocessor, lexer and parser for HLSL, the front end of the wgslift translator"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+keywords = ["hlsl", "shader", "parser", "wgsl", "preprocessor"]
+categories = ["parser-implementations", "graphics", "rendering"]
+
+[lints]
+workspace = true
