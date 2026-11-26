@@ -824,3 +824,867 @@ fn void() -> Expr {
         ty: Type::Void,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use wgslift_syntax::FileId;
+
+    use super::*;
+    use crate::Dialect;
+
+    /// Temps start here, so they never clash with the locals a test passes in.
+    const TEMP: usize = 100;
+
+    struct Mock {
+        dialect: Dialect,
+        stmts: Vec<Stmt>,
+        errors: Vec<String>,
+        warnings: Vec<String>,
+        locals: usize,
+        samplers: Vec<(usize, SamplerDim)>,
+        sampler_ok: bool,
+    }
+
+    impl Mock {
+        fn legacy() -> Mock {
+            Mock {
+                dialect: Dialect::d3d9_legacy(),
+                stmts: Vec::new(),
+                errors: Vec::new(),
+                warnings: Vec::new(),
+                locals: TEMP,
+                samplers: Vec::new(),
+                sampler_ok: true,
+            }
+        }
+
+        fn modern() -> Mock {
+            let mut cx = Mock::legacy();
+            cx.dialect.abs_domain_math = false;
+            cx
+        }
+    }
+
+    impl Lowerer for Mock {
+        fn dialect(&self) -> &Dialect {
+            &self.dialect
+        }
+
+        fn coerce(&mut self, value: Expr, to: &Type, span: Span) -> Expr {
+            if &value.ty == to {
+                return value;
+            }
+            let convert = |value: Expr| Expr {
+                kind: ExprKind::Convert(Box::new(value)),
+                ty: to.clone(),
+            };
+            match (value.ty.clone(), to) {
+                (Type::Scalar(_), Type::Vector(s, _)) => {
+                    let v = self.coerce(value, &Type::Scalar(*s), span);
+                    splat(v, to)
+                }
+                (Type::Vector(s, n), _) if to.size().is_some_and(|m| m < n) => {
+                    self.warn(span, "truncated".into());
+                    let m = to.size().unwrap();
+                    let v = swizzle(value, (0..m).collect(), Type::vector(s, m));
+                    self.coerce(v, to, span)
+                }
+                (Type::Matrix { rows, cols }, Type::Matrix { rows: r, cols: c })
+                    if *r <= rows && *c <= cols =>
+                {
+                    self.warn(span, "truncated".into());
+                    convert(value)
+                }
+                (from, _) if from.size().is_some() && from.size() == to.size() => convert(value),
+                _ => {
+                    self.errors.push("no conversion".into());
+                    convert(value)
+                }
+            }
+        }
+
+        fn error(&mut self, _span: Span, message: String) {
+            self.errors.push(message);
+        }
+
+        fn warn(&mut self, _span: Span, message: String) {
+            self.warnings.push(message);
+        }
+
+        fn temp(&mut self, value: Expr) -> Expr {
+            let id = self.locals;
+            self.locals += 1;
+            let ty = value.ty.clone();
+            self.stmts.push(Stmt::Local {
+                id,
+                init: Some(value),
+            });
+            local(id, ty)
+        }
+
+        fn emit(&mut self, stmt: Stmt) {
+            self.stmts.push(stmt);
+        }
+
+        fn use_sampler(&mut self, global: usize, dim: SamplerDim, _span: Span) -> bool {
+            self.samplers.push((global, dim));
+            self.sampler_ok
+        }
+    }
+
+    fn span() -> Span {
+        Span::new(FileId(0), 0, 0)
+    }
+
+    fn local(id: usize, ty: Type) -> Expr {
+        Expr {
+            kind: ExprKind::Var(Root::Local(id)),
+            ty,
+        }
+    }
+
+    fn float(n: u8) -> Type {
+        Type::vector(Scalar::Float, n)
+    }
+
+    fn int(n: u8) -> Type {
+        Type::vector(Scalar::Int, n)
+    }
+
+    fn bools(n: u8) -> Type {
+        Type::vector(Scalar::Bool, n)
+    }
+
+    fn mat(rows: u8, cols: u8) -> Type {
+        Type::Matrix { rows, cols }
+    }
+
+    fn convert(value: Expr, ty: Type) -> Expr {
+        Expr {
+            kind: ExprKind::Convert(Box::new(value)),
+            ty,
+        }
+    }
+
+    fn construct(parts: Vec<Expr>, ty: Type) -> Expr {
+        Expr {
+            kind: ExprKind::Construct(parts),
+            ty,
+        }
+    }
+
+    fn place(id: usize) -> Place {
+        Place {
+            root: Root::Local(id),
+            path: Vec::new(),
+        }
+    }
+
+    fn arg(value: Expr) -> IntrinsicArg {
+        IntrinsicArg {
+            value,
+            place: None,
+            span: span(),
+        }
+    }
+
+    fn out(id: usize, ty: Type) -> IntrinsicArg {
+        IntrinsicArg {
+            value: local(id, ty),
+            place: Some(place(id)),
+            span: span(),
+        }
+    }
+
+    fn sampler(index: usize, dim: SamplerDim) -> Expr {
+        Expr {
+            kind: ExprKind::Var(Root::Global(index)),
+            ty: Type::Sampler(dim),
+        }
+    }
+
+    fn lowered(cx: &mut Mock, name: &str, args: Vec<Expr>) -> Lowered {
+        lower(cx, name, args.into_iter().map(arg).collect(), span())
+    }
+
+    fn done(cx: &mut Mock, name: &str, args: Vec<Expr>) -> Expr {
+        match lowered(cx, name, args) {
+            Lowered::Done(e) => e,
+            other => panic!("`{name}` gave {other:?}, errors {:?}", cx.errors),
+        }
+    }
+
+    fn failed(cx: &mut Mock, name: &str, args: Vec<Expr>) {
+        assert_eq!(lowered(cx, name, args), Lowered::Failed, "{name}");
+        assert!(!cx.errors.is_empty(), "`{name}` failed without an error");
+    }
+
+    fn abs(e: Expr) -> Expr {
+        let ty = e.ty.clone();
+        call("abs", vec![e], ty)
+    }
+
+    fn times(a: Expr, b: Expr) -> Expr {
+        let ty = a.ty.clone();
+        binary(BinaryOp::Mul, a, b, ty)
+    }
+
+    #[test]
+    fn unknown_names_and_argument_counts_are_not_intrinsics() {
+        let mut cx = Mock::legacy();
+        let x = local(0, Type::FLOAT);
+        assert_eq!(
+            lowered(&mut cx, "foo", vec![x.clone()]),
+            Lowered::NotIntrinsic
+        );
+        let two = vec![x.clone(), x.clone()];
+        assert_eq!(lowered(&mut cx, "sin", two), Lowered::NotIntrinsic);
+        let s = sampler(0, SamplerDim::D2);
+        let three = vec![s, x.clone(), x];
+        assert_eq!(lowered(&mut cx, "tex2D", three), Lowered::NotIntrinsic);
+        assert!(cx.errors.is_empty() && cx.stmts.is_empty());
+    }
+
+    #[test]
+    fn one_argument_intrinsics_map_to_their_wgsl_names() {
+        let table = [
+            ("saturate", "saturate"),
+            ("frac", "fract"),
+            ("rsqrt", "inverseSqrt"),
+            ("sqrt", "sqrt"),
+            ("log", "log"),
+            ("log2", "log2"),
+            ("exp", "exp"),
+            ("exp2", "exp2"),
+            ("ddx", "dpdx"),
+            ("ddy", "dpdy"),
+            ("fwidth", "fwidth"),
+            ("sin", "sin"),
+            ("cos", "cos"),
+            ("tan", "tan"),
+            ("asin", "asin"),
+            ("acos", "acos"),
+            ("atan", "atan"),
+            ("floor", "floor"),
+            ("ceil", "ceil"),
+            ("round", "round"),
+            ("trunc", "trunc"),
+            ("degrees", "degrees"),
+            ("radians", "radians"),
+            ("abs", "abs"),
+        ];
+        for (hlsl, wgsl) in table {
+            let mut cx = Mock::modern();
+            let x = local(0, float(2));
+            let expected = call(wgsl, vec![x.clone()], float(2));
+            assert_eq!(done(&mut cx, hlsl, vec![x]), expected, "{hlsl}");
+        }
+    }
+
+    #[test]
+    fn two_and_three_argument_intrinsics_keep_their_argument_order() {
+        let (a, b, c) = (local(0, float(3)), local(1, float(3)), local(2, float(3)));
+        for name in ["atan2", "step", "min", "max"] {
+            let mut cx = Mock::modern();
+            let expected = call(name, vec![a.clone(), b.clone()], float(3));
+            assert_eq!(done(&mut cx, name, vec![a.clone(), b.clone()]), expected);
+        }
+        for name in ["smoothstep", "clamp"] {
+            let mut cx = Mock::modern();
+            let args = vec![a.clone(), b.clone(), c.clone()];
+            let expected = call(name, args.clone(), float(3));
+            assert_eq!(done(&mut cx, name, args), expected);
+        }
+    }
+
+    #[test]
+    fn lerp_lowers_to_mix_with_a_splatted_weight() {
+        let mut cx = Mock::legacy();
+        let (a, b, s) = (
+            local(0, float(3)),
+            local(1, float(3)),
+            local(2, Type::FLOAT),
+        );
+        let expected = call(
+            "mix",
+            vec![a.clone(), b.clone(), splat(s.clone(), &float(3))],
+            float(3),
+        );
+        assert_eq!(done(&mut cx, "lerp", vec![a, b, s]), expected);
+    }
+
+    #[test]
+    fn vectors_of_different_sizes_truncate_to_the_shortest() {
+        let mut cx = Mock::legacy();
+        let (a, b) = (local(0, float(4)), local(1, float(2)));
+        let expected = call(
+            "min",
+            vec![swizzle(a.clone(), vec![0, 1], float(2)), b.clone()],
+            float(2),
+        );
+        assert_eq!(done(&mut cx, "min", vec![a, b]), expected);
+        assert_eq!(cx.warnings, ["truncated"]);
+    }
+
+    #[test]
+    fn int_arguments_stay_int_where_wgsl_takes_ints() {
+        let mut cx = Mock::legacy();
+        let (a, b) = (local(0, int(2)), local(1, Type::INT));
+        let expected = call("max", vec![a.clone(), splat(b.clone(), &int(2))], int(2));
+        assert_eq!(done(&mut cx, "max", vec![a, b]), expected);
+        let flag = local(2, Type::BOOL);
+        let expected = call("abs", vec![convert(flag.clone(), Type::INT)], Type::INT);
+        assert_eq!(done(&mut cx, "abs", vec![flag]), expected);
+    }
+
+    #[test]
+    fn mixed_int_and_float_arguments_become_float() {
+        let mut cx = Mock::legacy();
+        let (i, f) = (local(0, Type::INT), local(1, Type::FLOAT));
+        let as_float = convert(i.clone(), Type::FLOAT);
+        let expected = call("min", vec![as_float.clone(), f.clone()], Type::FLOAT);
+        assert_eq!(done(&mut cx, "min", vec![i.clone(), f]), expected);
+        let expected = call("sin", vec![as_float], Type::FLOAT);
+        assert_eq!(done(&mut cx, "sin", vec![i]), expected);
+    }
+
+    #[test]
+    fn component_wise_intrinsics_run_per_column_on_matrices() {
+        let mut cx = Mock::legacy();
+        let m = local(0, mat(2, 3));
+        let row = |i| call("saturate", vec![column(m.clone(), i, 3)], float(3));
+        let expected = construct(vec![row(0), row(1)], mat(2, 3));
+        assert_eq!(done(&mut cx, "saturate", vec![m.clone()]), expected);
+
+        let (lo, hi) = (Expr::float(0.0), Expr::float(1.0));
+        let row = |i| {
+            let parts = vec![
+                column(m.clone(), i, 3),
+                splat(lo.clone(), &float(3)),
+                splat(hi.clone(), &float(3)),
+            ];
+            call("clamp", parts, float(3))
+        };
+        let expected = construct(vec![row(0), row(1)], mat(2, 3));
+        assert_eq!(
+            done(&mut cx, "clamp", vec![m.clone(), lo.clone(), hi.clone()]),
+            expected
+        );
+    }
+
+    #[test]
+    fn a_computed_matrix_is_read_once_through_a_temp() {
+        let mut cx = Mock::legacy();
+        let product = binary(
+            BinaryOp::MatMul,
+            local(0, mat(2, 2)),
+            local(1, mat(2, 2)),
+            mat(2, 2),
+        );
+        let result = done(&mut cx, "frac", vec![product.clone()]);
+        let init = Some(product);
+        assert_eq!(cx.stmts, [Stmt::Local { id: TEMP, init }]);
+        let t = local(TEMP, mat(2, 2));
+        let row = |i| call("fract", vec![column(t.clone(), i, 2)], float(2));
+        assert_eq!(result, construct(vec![row(0), row(1)], mat(2, 2)));
+    }
+
+    #[test]
+    fn mixing_vectors_and_matrices_or_passing_a_sampler_is_an_error() {
+        let mut cx = Mock::legacy();
+        failed(
+            &mut cx,
+            "max",
+            vec![local(0, float(2)), local(1, mat(2, 2))],
+        );
+        let mut cx = Mock::legacy();
+        failed(&mut cx, "sin", vec![sampler(0, SamplerDim::D2)]);
+    }
+
+    #[test]
+    fn abs_domain_math_wraps_the_input_of_pow_log_sqrt_and_rsqrt() {
+        let (x, y) = (local(0, float(2)), local(1, float(2)));
+        for (hlsl, wgsl) in [
+            ("sqrt", "sqrt"),
+            ("rsqrt", "inverseSqrt"),
+            ("log", "log"),
+            ("log2", "log2"),
+        ] {
+            let mut cx = Mock::legacy();
+            let expected = call(wgsl, vec![abs(x.clone())], float(2));
+            assert_eq!(done(&mut cx, hlsl, vec![x.clone()]), expected, "{hlsl}");
+        }
+        let mut cx = Mock::legacy();
+        let expected = call("pow", vec![abs(x.clone()), y.clone()], float(2));
+        assert_eq!(done(&mut cx, "pow", vec![x.clone(), y]), expected);
+        let factor = splat(Expr::float(std::f32::consts::LOG10_2), &float(2));
+        let expected = times(call("log2", vec![abs(x.clone())], float(2)), factor);
+        assert_eq!(done(&mut cx, "log10", vec![x.clone()]), expected);
+        let expected = call("exp", vec![x.clone()], float(2));
+        assert_eq!(done(&mut cx, "exp", vec![x]), expected);
+    }
+
+    #[test]
+    fn without_abs_domain_math_inputs_pass_unchanged() {
+        let mut cx = Mock::modern();
+        let (x, y) = (local(0, Type::FLOAT), local(1, Type::FLOAT));
+        let expected = call("pow", vec![x.clone(), y.clone()], Type::FLOAT);
+        assert_eq!(done(&mut cx, "pow", vec![x.clone(), y]), expected);
+        let factor = Expr::float(std::f32::consts::LOG10_2);
+        let expected = times(call("log2", vec![x.clone()], Type::FLOAT), factor);
+        assert_eq!(done(&mut cx, "log10", vec![x]), expected);
+    }
+
+    #[test]
+    fn pow_with_a_whole_literal_exponent_from_one_to_four_multiplies() {
+        for mut cx in [Mock::legacy(), Mock::modern()] {
+            let x = local(0, float(3));
+            let cube = times(times(x.clone(), x.clone()), x.clone());
+            assert_eq!(done(&mut cx, "pow", vec![x.clone(), Expr::int(3)]), cube);
+            let square = times(x.clone(), x.clone());
+            assert_eq!(
+                done(&mut cx, "pow", vec![x.clone(), Expr::float(2.0)]),
+                square
+            );
+            assert_eq!(done(&mut cx, "pow", vec![x.clone(), Expr::int(1)]), x);
+        }
+        let mut cx = Mock::modern();
+        let x = local(0, Type::FLOAT);
+        for exponent in [Expr::int(5), Expr::int(0), Expr::float(2.5)] {
+            let result = done(&mut cx, "pow", vec![x.clone(), exponent]);
+            assert!(matches!(result.kind, ExprKind::Builtin("pow", _)));
+        }
+    }
+
+    #[test]
+    fn pow_reads_a_computed_base_once() {
+        let mut cx = Mock::legacy();
+        let base = call("sin", vec![local(0, Type::FLOAT)], Type::FLOAT);
+        let result = done(&mut cx, "pow", vec![base.clone(), Expr::int(2)]);
+        let t = local(TEMP, Type::FLOAT);
+        assert_eq!(result, times(t.clone(), t));
+        let init = Some(base);
+        assert_eq!(cx.stmts, [Stmt::Local { id: TEMP, init }]);
+    }
+
+    #[test]
+    fn sign_returns_int_components() {
+        let mut cx = Mock::legacy();
+        let x = local(0, float(3));
+        let expected = convert(call("sign", vec![x.clone()], float(3)), int(3));
+        assert_eq!(done(&mut cx, "sign", vec![x]), expected);
+        let i = local(1, Type::INT);
+        let expected = call("sign", vec![i.clone()], Type::INT);
+        assert_eq!(done(&mut cx, "sign", vec![i]), expected);
+        let u = local(2, Type::Scalar(Scalar::Uint));
+        let expected = call("sign", vec![convert(u.clone(), Type::INT)], Type::INT);
+        assert_eq!(done(&mut cx, "sign", vec![u]), expected);
+    }
+
+    #[test]
+    fn fmod_is_the_wgsl_remainder() {
+        let mut cx = Mock::legacy();
+        let (x, y) = (local(0, float(2)), local(1, Type::FLOAT));
+        let expected = binary(
+            BinaryOp::Rem,
+            x.clone(),
+            splat(y.clone(), &float(2)),
+            float(2),
+        );
+        assert_eq!(done(&mut cx, "fmod", vec![x, y]), expected);
+    }
+
+    #[test]
+    fn geometric_intrinsics_have_their_result_types() {
+        let mut cx = Mock::legacy();
+        let (a, b) = (local(0, float(3)), local(1, float(3)));
+        let one = || vec![a.clone()];
+        let two = || vec![a.clone(), b.clone()];
+        assert_eq!(
+            done(&mut cx, "length", one()),
+            call("length", one(), Type::FLOAT)
+        );
+        assert_eq!(
+            done(&mut cx, "distance", two()),
+            call("distance", two(), Type::FLOAT)
+        );
+        assert_eq!(done(&mut cx, "dot", two()), call("dot", two(), Type::FLOAT));
+        assert_eq!(
+            done(&mut cx, "normalize", one()),
+            call("normalize", one(), float(3))
+        );
+        assert_eq!(
+            done(&mut cx, "reflect", two()),
+            call("reflect", two(), float(3))
+        );
+        assert_eq!(
+            done(&mut cx, "cross", two()),
+            call("cross", two(), float(3))
+        );
+        let ints = vec![local(2, int(2)), local(3, int(2))];
+        assert_eq!(
+            done(&mut cx, "dot", ints.clone()),
+            call("dot", ints, Type::INT)
+        );
+        let (s, t) = (local(4, Type::FLOAT), local(5, Type::FLOAT));
+        assert_eq!(
+            done(&mut cx, "dot", vec![s.clone(), t.clone()]),
+            times(s.clone(), t)
+        );
+        assert!(cx.errors.is_empty());
+        failed(&mut cx, "normalize", vec![s]);
+        let mut cx = Mock::legacy();
+        failed(&mut cx, "length", vec![local(0, mat(3, 3))]);
+    }
+
+    #[test]
+    fn cross_truncates_a_longer_vector() {
+        let mut cx = Mock::legacy();
+        let (a, b) = (local(0, float(4)), local(1, float(3)));
+        let xyz = swizzle(a.clone(), vec![0, 1, 2], float(3));
+        let expected = call("cross", vec![xyz, b.clone()], float(3));
+        assert_eq!(done(&mut cx, "cross", vec![a, b]), expected);
+        assert_eq!(cx.warnings, ["truncated"]);
+    }
+
+    #[test]
+    fn transpose_swaps_the_shape_and_determinant_needs_a_square_matrix() {
+        let mut cx = Mock::legacy();
+        let m = local(0, mat(2, 3));
+        let expected = call("transpose", vec![m.clone()], mat(3, 2));
+        assert_eq!(done(&mut cx, "transpose", vec![m.clone()]), expected);
+        let square = local(1, mat(3, 3));
+        let expected = call("determinant", vec![square.clone()], Type::FLOAT);
+        assert_eq!(done(&mut cx, "determinant", vec![square]), expected);
+        failed(&mut cx, "determinant", vec![m]);
+        let mut cx = Mock::legacy();
+        failed(&mut cx, "transpose", vec![local(0, float(3))]);
+    }
+
+    #[test]
+    fn all_and_any_compare_numbers_with_zero() {
+        let mut cx = Mock::legacy();
+        let v = local(0, float(3));
+        let ne = binary(
+            BinaryOp::Ne,
+            v.clone(),
+            splat(Expr::float(0.0), &float(3)),
+            bools(3),
+        );
+        assert_eq!(
+            done(&mut cx, "any", vec![v]),
+            call("any", vec![ne], Type::BOOL)
+        );
+        let b = local(1, bools(3));
+        assert_eq!(
+            done(&mut cx, "all", vec![b.clone()]),
+            call("all", vec![b], Type::BOOL)
+        );
+        let i = local(2, Type::INT);
+        let expected = binary(BinaryOp::Ne, i.clone(), Expr::int(0), Type::BOOL);
+        assert_eq!(done(&mut cx, "all", vec![i]), expected);
+        let m = local(3, mat(2, 2));
+        let row = |k| {
+            let zero = splat(Expr::float(0.0), &float(2));
+            let ne = binary(BinaryOp::Ne, column(m.clone(), k, 2), zero, bools(2));
+            call("all", vec![ne], Type::BOOL)
+        };
+        let expected = binary(BinaryOp::And, row(0), row(1), Type::BOOL);
+        assert_eq!(done(&mut cx, "all", vec![m.clone()]), expected);
+    }
+
+    #[test]
+    fn isnan_and_isinf_become_comparisons_with_a_warning() {
+        let mut cx = Mock::legacy();
+        let x = local(0, float(2));
+        let expected = binary(BinaryOp::Ne, x.clone(), x.clone(), bools(2));
+        assert_eq!(done(&mut cx, "isnan", vec![x.clone()]), expected);
+        let max = splat(Expr::float(f32::MAX), &float(2));
+        let expected = binary(BinaryOp::Gt, abs(x.clone()), max, bools(2));
+        assert_eq!(done(&mut cx, "isinf", vec![x]), expected);
+        assert_eq!(cx.warnings.len(), 2);
+        let mut cx = Mock::legacy();
+        failed(&mut cx, "isnan", vec![local(0, mat(2, 2))]);
+    }
+
+    #[test]
+    fn lit_builds_the_lighting_vector() {
+        let mut cx = Mock::legacy();
+        let (l, h, m) = (
+            local(0, Type::FLOAT),
+            local(1, Type::FLOAT),
+            local(2, Type::FLOAT),
+        );
+        let below = |e: &Expr| binary(BinaryOp::Lt, e.clone(), Expr::float(0.0), Type::BOOL);
+        let diffuse = select(below(&l), Expr::float(0.0), l.clone());
+        let either = binary(BinaryOp::Or, below(&l), below(&h), Type::BOOL);
+        let power = call("pow", vec![h.clone(), m.clone()], Type::FLOAT);
+        let specular = select(either, Expr::float(0.0), power);
+        let one = Expr::float(1.0);
+        let expected = construct(vec![one.clone(), diffuse, specular, one], float(4));
+        assert_eq!(done(&mut cx, "lit", vec![l, h, m]), expected);
+    }
+
+    #[test]
+    fn mul_with_a_scalar_is_a_product() {
+        let mut cx = Mock::legacy();
+        let (s, t) = (local(0, Type::FLOAT), local(1, Type::FLOAT));
+        assert_eq!(
+            done(&mut cx, "mul", vec![s.clone(), t.clone()]),
+            times(s.clone(), t)
+        );
+        let v = local(2, float(3));
+        let s3 = splat(s.clone(), &float(3));
+        assert_eq!(
+            done(&mut cx, "mul", vec![s.clone(), v.clone()]),
+            times(s3.clone(), v.clone())
+        );
+        assert_eq!(
+            done(&mut cx, "mul", vec![v.clone(), s.clone()]),
+            times(v, s3)
+        );
+        let m = local(3, mat(2, 2));
+        let row = |i| times(splat(s.clone(), &float(2)), column(m.clone(), i, 2));
+        let expected = construct(vec![row(0), row(1)], mat(2, 2));
+        assert_eq!(done(&mut cx, "mul", vec![s.clone(), m.clone()]), expected);
+    }
+
+    #[test]
+    fn mul_of_two_vectors_is_a_dot_product() {
+        let mut cx = Mock::legacy();
+        let (a, b) = (local(0, float(4)), local(1, float(4)));
+        let expected = call("dot", vec![a.clone(), b.clone()], Type::FLOAT);
+        assert_eq!(done(&mut cx, "mul", vec![a, b]), expected);
+    }
+
+    #[test]
+    fn mul_with_matrices_swaps_the_wgsl_operands() {
+        let mut cx = Mock::legacy();
+        let v = local(0, float(4));
+        let m = local(1, mat(4, 3));
+        let expected = binary(BinaryOp::MatMul, m.clone(), v.clone(), float(3));
+        assert_eq!(done(&mut cx, "mul", vec![v.clone(), m]), expected);
+        let m = local(2, mat(3, 4));
+        let expected = binary(BinaryOp::MatMul, v.clone(), m.clone(), float(3));
+        assert_eq!(done(&mut cx, "mul", vec![m, v]), expected);
+        let (a, b) = (local(3, mat(2, 3)), local(4, mat(3, 4)));
+        let expected = binary(BinaryOp::MatMul, b.clone(), a.clone(), mat(2, 4));
+        assert_eq!(done(&mut cx, "mul", vec![a, b]), expected);
+        assert!(cx.warnings.is_empty() && cx.errors.is_empty());
+    }
+
+    #[test]
+    fn mul_truncates_a_long_vector_or_a_large_matrix() {
+        let mut cx = Mock::legacy();
+        let v = local(0, float(4));
+        let m = local(1, mat(3, 3));
+        let xyz = swizzle(v.clone(), vec![0, 1, 2], float(3));
+        let expected = binary(BinaryOp::MatMul, m.clone(), xyz, float(3));
+        assert_eq!(done(&mut cx, "mul", vec![v, m]), expected);
+
+        let v = local(2, float(3));
+        let big = local(3, mat(4, 4));
+        let cut = convert(big.clone(), mat(3, 4));
+        let expected = binary(BinaryOp::MatMul, cut, v.clone(), float(4));
+        assert_eq!(done(&mut cx, "mul", vec![v.clone(), big]), expected);
+
+        let int_v = local(4, int(2));
+        let m = local(5, mat(2, 2));
+        let as_float = convert(int_v.clone(), float(2));
+        let expected = binary(BinaryOp::MatMul, as_float, m.clone(), float(2));
+        assert_eq!(done(&mut cx, "mul", vec![m, int_v]), expected);
+        assert_eq!(cx.warnings, ["truncated", "truncated"]);
+        failed(&mut cx, "mul", vec![sampler(0, SamplerDim::D2), v]);
+    }
+
+    #[test]
+    fn modf_assigns_the_whole_part_and_returns_the_fraction() {
+        let mut cx = Mock::legacy();
+        let x = local(0, float(2));
+        let args = vec![arg(x.clone()), out(1, float(2))];
+        let Lowered::Done(result) = lower(&mut cx, "modf", args, span()) else {
+            panic!("modf failed: {:?}", cx.errors);
+        };
+        let whole = local(TEMP, float(2));
+        let init = Some(call("trunc", vec![x.clone()], float(2)));
+        let expected = [
+            Stmt::Local { id: TEMP, init },
+            Stmt::Assign(place(1), whole.clone()),
+        ];
+        assert_eq!(cx.stmts, expected);
+        assert_eq!(result, binary(BinaryOp::Sub, x, whole, float(2)));
+    }
+
+    #[test]
+    fn sincos_assigns_both_outputs_and_returns_nothing() {
+        let mut cx = Mock::legacy();
+        let x = local(0, Type::FLOAT);
+        let args = vec![arg(x.clone()), out(1, Type::FLOAT), out(2, Type::FLOAT)];
+        assert_eq!(
+            lower(&mut cx, "sincos", args, span()),
+            Lowered::Done(void())
+        );
+        let expected = [
+            Stmt::Assign(place(1), call("sin", vec![x.clone()], Type::FLOAT)),
+            Stmt::Assign(place(2), call("cos", vec![x], Type::FLOAT)),
+        ];
+        assert_eq!(cx.stmts, expected);
+    }
+
+    #[test]
+    fn an_out_argument_without_a_place_is_an_error() {
+        let mut cx = Mock::legacy();
+        let x = local(0, Type::FLOAT);
+        let args = vec![arg(x.clone()), arg(Expr::float(1.0))];
+        assert_eq!(lower(&mut cx, "modf", args, span()), Lowered::Failed);
+        let args = vec![arg(x), out(1, Type::FLOAT), arg(Expr::float(1.0))];
+        assert_eq!(lower(&mut cx, "sincos", args, span()), Lowered::Failed);
+        assert_eq!(cx.errors.len(), 2);
+        assert!(cx.stmts.is_empty());
+    }
+
+    #[test]
+    fn clip_discards_when_any_component_is_below_zero() {
+        let mut cx = Mock::legacy();
+        let x = local(0, float(3));
+        assert_eq!(done(&mut cx, "clip", vec![x.clone()]), void());
+        let below = binary(
+            BinaryOp::Lt,
+            x,
+            splat(Expr::float(0.0), &float(3)),
+            bools(3),
+        );
+        let cond = call("any", vec![below], Type::BOOL);
+        assert_eq!(cx.stmts, [Stmt::If(cond, vec![Stmt::Discard], Vec::new())]);
+
+        let mut cx = Mock::legacy();
+        let s = local(1, Type::FLOAT);
+        done(&mut cx, "clip", vec![s.clone()]);
+        let cond = binary(BinaryOp::Lt, s, Expr::float(0.0), Type::BOOL);
+        assert_eq!(cx.stmts, [Stmt::If(cond, vec![Stmt::Discard], Vec::new())]);
+    }
+
+    fn sampled(sampler: usize, coords: Expr, kind: Sample) -> Expr {
+        Expr {
+            kind: ExprKind::Sample {
+                sampler,
+                coords: Box::new(coords),
+                kind,
+            },
+            ty: float(4),
+        }
+    }
+
+    #[test]
+    fn plain_tex_functions_sample_with_their_dimension() {
+        let table = [
+            ("tex1D", SamplerDim::D1, 1),
+            ("tex2D", SamplerDim::D2, 2),
+            ("tex3D", SamplerDim::D3, 3),
+            ("texCUBE", SamplerDim::Cube, 3),
+        ];
+        for (name, dim, size) in table {
+            let mut cx = Mock::legacy();
+            let t = local(0, float(size));
+            let expected = sampled(2, t.clone(), Sample::Plain);
+            assert_eq!(
+                done(&mut cx, name, vec![sampler(2, SamplerDim::Any), t]),
+                expected
+            );
+            assert_eq!(cx.samplers, [(2, dim)], "{name}");
+        }
+    }
+
+    #[test]
+    fn tex2d_with_gradients_and_tex2dgrad_sample_with_gradients() {
+        for name in ["tex2D", "tex2Dgrad"] {
+            let mut cx = Mock::legacy();
+            let (t, dx, dy) = (local(0, float(2)), local(1, float(2)), local(2, float(2)));
+            let expected = sampled(
+                0,
+                t.clone(),
+                Sample::Grad(Box::new(dx.clone()), Box::new(dy.clone())),
+            );
+            let args = vec![sampler(0, SamplerDim::D2), t, dx, dy];
+            assert_eq!(done(&mut cx, name, args), expected, "{name}");
+            assert_eq!(cx.samplers, [(0, SamplerDim::D2)]);
+        }
+    }
+
+    #[test]
+    fn lod_and_bias_functions_take_w_as_the_level_or_bias() {
+        let table = [
+            ("tex2Dlod", SamplerDim::D2, true),
+            ("tex3Dlod", SamplerDim::D3, true),
+            ("texCUBElod", SamplerDim::Cube, true),
+            ("tex2Dbias", SamplerDim::D2, false),
+            ("tex3Dbias", SamplerDim::D3, false),
+            ("texCUBEbias", SamplerDim::Cube, false),
+        ];
+        for (name, dim, level) in table {
+            let mut cx = Mock::legacy();
+            let t = local(0, float(4));
+            let size = if dim == SamplerDim::D2 { 2 } else { 3 };
+            let coords = swizzle(t.clone(), (0..size).collect(), float(size));
+            let w = Box::new(swizzle(t.clone(), vec![3], Type::FLOAT));
+            let kind = if level {
+                Sample::Level(w)
+            } else {
+                Sample::Bias(w)
+            };
+            let expected = sampled(1, coords, kind);
+            assert_eq!(
+                done(&mut cx, name, vec![sampler(1, dim), t]),
+                expected,
+                "{name}"
+            );
+            assert_eq!(cx.samplers, [(1, dim)], "{name}");
+        }
+    }
+
+    #[test]
+    fn tex2dproj_divides_by_w() {
+        let mut cx = Mock::legacy();
+        let t = local(0, float(4));
+        let xy = swizzle(t.clone(), vec![0, 1], float(2));
+        let w = splat(swizzle(t.clone(), vec![3], Type::FLOAT), &float(2));
+        let expected = sampled(0, binary(BinaryOp::Div, xy, w, float(2)), Sample::Plain);
+        assert_eq!(
+            done(&mut cx, "tex2Dproj", vec![sampler(0, SamplerDim::D2), t]),
+            expected
+        );
+    }
+
+    #[test]
+    fn tex_coordinates_are_coerced_to_the_dimension() {
+        let mut cx = Mock::legacy();
+        let t = local(0, float(4));
+        let expected = sampled(0, swizzle(t.clone(), vec![0, 1], float(2)), Sample::Plain);
+        assert_eq!(
+            done(&mut cx, "tex2D", vec![sampler(0, SamplerDim::D2), t]),
+            expected
+        );
+        assert_eq!(cx.warnings, ["truncated"]);
+
+        let computed = call("fract", vec![local(1, float(4))], float(4));
+        done(
+            &mut cx,
+            "tex2Dlod",
+            vec![sampler(0, SamplerDim::D2), computed.clone()],
+        );
+        let init = Some(computed);
+        assert_eq!(cx.stmts, [Stmt::Local { id: TEMP, init }]);
+    }
+
+    #[test]
+    fn tex_functions_need_a_sampler_global_of_a_matching_dimension() {
+        let mut cx = Mock::legacy();
+        let t = local(1, float(2));
+        failed(&mut cx, "tex2D", vec![local(0, float(2)), t.clone()]);
+        let mut cx = Mock::legacy();
+        cx.sampler_ok = false;
+        let args = vec![sampler(0, SamplerDim::D3), t];
+        assert_eq!(lowered(&mut cx, "tex2D", args), Lowered::Failed);
+        assert_eq!(cx.samplers, [(0, SamplerDim::D2)]);
+    }
+}
