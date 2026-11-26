@@ -192,7 +192,7 @@ float4 f(VSOut v, uniform float k = 2, float) : SV_Target { palette p; color c =
     let Item::Variable(sampler) = &unit.items[7] else {
         panic!()
     };
-    let reg = sampler.declarators[0].bindings.register.as_ref().unwrap();
+    let reg = &sampler.declarators[0].bindings.registers[0];
     assert_eq!(reg.profile.as_ref().unwrap().name, "ps_3_0");
     let Some(Initializer::SamplerState(states, _)) = &sampler.declarators[0].init else {
         panic!()
@@ -525,4 +525,65 @@ fn errors_in_struct_buffer_and_sampler_bodies_stay_inside_the_body() {
         };
         assert_eq!(kept, members, "{text}");
     }
+}
+
+#[test]
+fn geometry_hull_and_domain_shader_parameters() {
+    let text = "struct VS_OUT { float4 p : SV_Position; };\nstruct HS_OUT { float4 p : POS; };\n\
+        [maxvertexcount(3)] void GS(triangle float4 p[3] : SV_Position, inout TriangleStream<VS_OUT> s) { s.Append((VS_OUT)0); }\n\
+        HS_OUT HS(InputPatch<VS_OUT, 4> ip, uint i : SV_OutputControlPointID) { HS_OUT o; return o; }\n\
+        void DS(const OutputPatch<HS_OUT, 4> patch, lineadj float a[4] : A, point float b[1] : B, line float c[2] : C, triangleadj float d[6] : D) { }";
+    let unit = ok(text);
+    let Item::Function(gs) = &unit.items[2] else {
+        panic!()
+    };
+    assert_eq!(gs.params[0].modifiers, [Modifier::Triangle]);
+    assert_eq!(gs.params[1].ty.name.name, "TriangleStream");
+    let Item::Function(ds) = &unit.items[4] else {
+        panic!()
+    };
+    let mods: Vec<_> = ds.params[1..].iter().map(|p| p.modifiers[0]).collect();
+    assert_eq!(
+        mods,
+        [
+            Modifier::LineAdj,
+            Modifier::Point,
+            Modifier::Line,
+            Modifier::TriangleAdj
+        ]
+    );
+}
+
+#[test]
+fn the_d3d10_sampler_block() {
+    let unit =
+        ok("SamplerState samLinear { Filter = MIN_MAG_MIP_LINEAR; AddressU = Wrap; };\nfloat x;");
+    let Item::Variable(var) = &unit.items[0] else {
+        panic!()
+    };
+    let Some(Initializer::SamplerState(states, _)) = &var.declarators[0].init else {
+        panic!()
+    };
+    assert_eq!(states.len(), 2);
+    assert_eq!(errors("float x { a = 1; };").len(), 1);
+}
+
+#[test]
+fn register_spaces_and_one_register_per_profile() {
+    let unit = ok(
+        "Texture2D tex : register(t0, space1);\nfloat4 c : register(vs_3_0, c0) : register(ps_3_0, c1);\nsampler s : register(s2);",
+    );
+    let reg = |i: usize, n: usize| {
+        let Item::Variable(v) = &unit.items[i] else {
+            panic!()
+        };
+        let r = &v.declarators[0].bindings.registers[n];
+        let name = |x: &Option<Ident>| x.as_ref().map(|x| x.name.clone());
+        (name(&r.profile), r.slot.name.clone(), name(&r.space))
+    };
+    assert_eq!(reg(0, 0), (None, "t0".into(), Some("space1".into())));
+    assert_eq!(reg(1, 0), (Some("vs_3_0".into()), "c0".into(), None));
+    assert_eq!(reg(1, 1), (Some("ps_3_0".into()), "c1".into(), None));
+    assert_eq!(reg(2, 0), (None, "s2".into(), None));
+    assert_eq!(errors("float a : register(a, b, c, d);").len(), 1);
 }

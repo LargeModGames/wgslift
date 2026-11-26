@@ -67,7 +67,7 @@ const SCALARS: [&str; 21] = [
 ];
 
 /// Types that take arguments in `<>`.
-const TEMPLATE_TYPES: [&str; 23] = [
+const TEMPLATE_TYPES: [&str; 28] = [
     "vector",
     "matrix",
     "Texture1D",
@@ -91,6 +91,11 @@ const TEMPLATE_TYPES: [&str; 23] = [
     "RWTexture2DArray",
     "RWTexture3D",
     "ConstantBuffer",
+    "PointStream",
+    "LineStream",
+    "TriangleStream",
+    "InputPatch",
+    "OutputPatch",
 ];
 
 const OTHER_TYPES: [&str; 15] = [
@@ -113,6 +118,10 @@ const OTHER_TYPES: [&str; 15] = [
 
 fn is_keyword(word: &str) -> bool {
     KEYWORDS.contains(&word)
+}
+
+fn is_sampler_type(word: &str) -> bool {
+    word.starts_with("sampler") || word == "SamplerState" || word == "SamplerComparisonState"
 }
 
 fn is_template_type(word: &str) -> bool {
@@ -465,7 +474,7 @@ impl Parser<'_> {
                 return Ok(());
             }
             let first = self.ident()?;
-            let declarators = self.declarators(first)?;
+            let declarators = self.declarators(first, &ty)?;
             self.expect(Punct::Semi)?;
             items.push(Item::Variable(VarDecl {
                 modifiers: Vec::new(),
@@ -506,7 +515,7 @@ impl Parser<'_> {
                 "attributes are only allowed on functions and statements",
             ));
         }
-        let declarators = self.declarators(name)?;
+        let declarators = self.declarators(name, &ty)?;
         self.expect(Punct::Semi)?;
         items.push(Item::Variable(VarDecl {
             modifiers,
@@ -698,7 +707,7 @@ impl Parser<'_> {
         let modifiers = self.modifiers();
         let ty = self.type_ref()?;
         let first = self.ident()?;
-        let declarators = self.declarators(first)?;
+        let declarators = self.declarators(first, &ty)?;
         self.expect(Punct::Semi)?;
         Ok(VarDecl {
             modifiers,
@@ -708,16 +717,16 @@ impl Parser<'_> {
         })
     }
 
-    fn declarators(&mut self, first: Ident) -> PResult<Vec<Declarator>> {
-        let mut declarators = vec![self.declarator(first)?];
+    fn declarators(&mut self, first: Ident, ty: &TypeRef) -> PResult<Vec<Declarator>> {
+        let mut declarators = vec![self.declarator(first, ty)?];
         while self.eat(Punct::Comma) {
             let name = self.ident()?;
-            declarators.push(self.declarator(name)?);
+            declarators.push(self.declarator(name, ty)?);
         }
         Ok(declarators)
     }
 
-    fn declarator(&mut self, name: Ident) -> PResult<Declarator> {
+    fn declarator(&mut self, name: Ident, ty: &TypeRef) -> PResult<Declarator> {
         let array = self.array_dims()?;
         let bindings = self.bindings()?;
         let annotations = if self.at(Punct::Lt) {
@@ -727,6 +736,12 @@ impl Parser<'_> {
         };
         let init = if self.eat(Punct::Eq) {
             Some(self.initializer()?)
+        } else if self.at(Punct::LBrace) && is_sampler_type(&ty.name.name) {
+            // The D3D10 form: `SamplerState s { Filter = ...; };`
+            let start = self.here();
+            self.pos += 1;
+            let states = self.body_list(Self::state_assignment)?;
+            Some(Initializer::SamplerState(states, self.since(start)))
         } else {
             None
         };
@@ -759,16 +774,29 @@ impl Parser<'_> {
             let start = self.here();
             if self.eat_word("register") {
                 self.expect(Punct::LParen)?;
-                let mut profile = None;
-                let mut slot = self.word()?;
-                if self.eat(Punct::Comma) {
-                    profile = Some(slot);
-                    slot = self.word()?;
+                let mut words = vec![self.word()?];
+                while words.len() < 3 && self.eat(Punct::Comma) {
+                    words.push(self.word()?);
                 }
                 self.expect(Punct::RParen)?;
-                bindings.register = Some(Register {
+                let is_space = |w: &Ident| {
+                    w.name
+                        .strip_prefix("space")
+                        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+                };
+                let space = match words.last() {
+                    Some(last) if words.len() > 1 && is_space(last) => words.pop(),
+                    _ => None,
+                };
+                let slot = words.pop().expect("one word at least");
+                let profile = words.pop();
+                if !words.is_empty() {
+                    return Err(self.error(self.since(start), "too many words in `register(...)`"));
+                }
+                bindings.registers.push(Register {
                     profile,
                     slot,
+                    space,
                     span: self.since(start),
                 });
             } else if self.eat_word("packoffset") {

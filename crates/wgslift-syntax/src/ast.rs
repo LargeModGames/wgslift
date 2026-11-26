@@ -78,6 +78,11 @@ pub enum Modifier {
     Inout,
     Snorm,
     Unorm,
+    Point,
+    Line,
+    Triangle,
+    LineAdj,
+    TriangleAdj,
 }
 
 impl Modifier {
@@ -105,18 +110,25 @@ impl Modifier {
             "inout" => Modifier::Inout,
             "snorm" => Modifier::Snorm,
             "unorm" => Modifier::Unorm,
+            "point" => Modifier::Point,
+            "line" => Modifier::Line,
+            "triangle" => Modifier::Triangle,
+            "lineadj" => Modifier::LineAdj,
+            "triangleadj" => Modifier::TriangleAdj,
             _ => return None,
         })
     }
 }
 
-/// `register(c0)` or `register(ps_3_0, s1)` after a declaration.
+/// `register(c0)`, `register(ps_3_0, s1)` or `register(t0, space1)` after a declaration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Register {
     /// The shader profile, if one is given.
     pub profile: Option<Ident>,
     /// The register, for example `c0` or `s1`.
     pub slot: Ident,
+    /// The register space, for example `space1`.
+    pub space: Option<Ident>,
     /// The whole `register(...)`.
     pub span: Span,
 }
@@ -137,8 +149,8 @@ pub struct PackOffset {
 pub struct Bindings {
     /// A semantic, for example `TEXCOORD0` or `SV_Target`.
     pub semantic: Option<Ident>,
-    /// A `register(...)` binding.
-    pub register: Option<Register>,
+    /// The `register(...)` bindings: one for each shader profile, or one for all.
+    pub registers: Vec<Register>,
     /// A `packoffset(...)` binding.
     pub packoffset: Option<PackOffset>,
 }
@@ -180,7 +192,8 @@ pub enum Initializer {
     Expr(Expr),
     /// `= { a, b, ... }`
     List(Vec<Initializer>, Span),
-    /// `= sampler_state { Name = value; ... }`
+    /// `= sampler_state { Name = value; ... }`, or the D3D10 form
+    /// `SamplerState s { Name = value; ... };`
     SamplerState(Vec<StateAssignment>, Span),
 }
 
