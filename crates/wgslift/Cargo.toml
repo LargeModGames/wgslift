@@ -14,5 +14,8 @@ categories = ["graphics", "rendering", "compilers"]
 [dependencies]
 wgslift-syntax = { path = "../wgslift-syntax", version = "0.0.0" }
 
+[dev-dependencies]
+naga = { version = "30.0.2", default-features = false, features = ["wgsl-in"] }
+
 [lints]
 workspace = true
