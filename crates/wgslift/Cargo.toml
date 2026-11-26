@@ -11,6 +11,8 @@ readme = "../../README.md"
 keywords = ["hlsl", "wgsl", "shader", "translator", "wgpu"]
 categories = ["graphics", "rendering", "compilers"]
 
+[dependencies]
+wgslift-syntax = { path = "../wgslift-syntax", version = "0.0.0" }
 
 [lints]
 workspace = true
