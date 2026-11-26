@@ -267,6 +267,8 @@ impl Analyzer<'_> {
                     .or_else(|| digits.strip_prefix("0X"))
                 {
                     i64::from_str_radix(hex, 16).ok()
+                } else if digits.len() > 1 && digits.starts_with('0') {
+                    i64::from_str_radix(&digits[1..], 8).ok()
                 } else {
                     digits.parse().ok()
                 };

@@ -387,6 +387,12 @@ fn a_for_loop_variable_stays_visible_after_the_loop() {
 }
 
 #[test]
+fn a_constant_integer_with_a_leading_zero_is_octal() {
+    let m = ok("static float a[010];\nfloat main() : COLOR { return a[0]; }");
+    assert_eq!(m.globals[0].ty, Type::Array(Box::new(Type::FLOAT), 8));
+}
+
+#[test]
 fn modf_and_sincos_read_the_input_before_they_store_into_it() {
     let m = ok(
         "float main() : COLOR { float a = 3.7; float f = modf(a, a); float b = 1; float c; sincos(b, b, c); return f + c; }",
