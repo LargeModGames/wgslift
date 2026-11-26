@@ -816,20 +816,16 @@ fn prune(module: ir::Module) -> ir::Module {
             }
             let global = &module.globals[g];
             for value in global.init.iter().chain(&global.entry_init) {
-                visit_expr(value, &mut |e| {
-                    if let ExprKind::Var(Root::Global(other)) = e.kind
-                        && !used_globals[other]
+                visit_expr(value, &mut |e| match e.kind {
+                    ExprKind::Var(Root::Global(other))
+                    | ExprKind::Sample { sampler: other, .. }
+                        if !used_globals[other] =>
                     {
                         used_globals[other] = true;
                         changed = true;
                     }
-                });
-            }
-            for value in global.entry_init.iter() {
-                visit_expr(value, &mut |e| {
-                    if let ExprKind::Call(callee, _) = e.kind {
-                        stack.push(callee);
-                    }
+                    ExprKind::Call(callee, _) => stack.push(callee),
+                    _ => {}
                 });
             }
         }

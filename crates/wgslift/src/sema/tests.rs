@@ -393,6 +393,14 @@ fn a_constant_integer_with_a_leading_zero_is_octal() {
 }
 
 #[test]
+fn a_sampler_used_only_in_a_global_value_is_kept() {
+    let m = ok(
+        "sampler s;\nstatic float4 c = tex2D(s, float2(0.5, 0.5));\nfloat main() : COLOR { return c.x; }",
+    );
+    assert!(m.globals.iter().any(|g| g.name == "s"), "{:?}", m.globals);
+}
+
+#[test]
 fn modf_and_sincos_read_the_input_before_they_store_into_it() {
     let m = ok(
         "float main() : COLOR { float a = 3.7; float f = modf(a, a); float b = 1; float c; sincos(b, b, c); return f + c; }",
