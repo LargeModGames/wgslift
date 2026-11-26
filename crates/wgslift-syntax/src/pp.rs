@@ -218,8 +218,12 @@ impl Preprocessor<'_> {
             },
             "include" => self.include(rest, span),
             "error" => {
-                let text: Vec<&str> = rest.iter().map(|t| t.text.as_str()).collect();
-                self.error(span, format!("#error {}", text.join(" ")));
+                // The message as written, from the first to the last token of the line.
+                let text = match (rest.first(), rest.last()) {
+                    (Some(a), Some(b)) => self.files.text(a.span.to(b.span)).to_string(),
+                    _ => String::new(),
+                };
+                self.error(span, format!("#error {text}").trim_end().to_string());
             }
             "line" | "pragma" => {}
             _ => self.error(name_token.span, format!("unknown directive `#{name}`")),
@@ -289,8 +293,14 @@ impl Preprocessor<'_> {
 
     fn include(&mut self, rest: &[Token], span: Span) {
         let (path, angled) = match rest.first() {
-            Some(t) if t.kind == TokenKind::Str && t.text.len() >= 2 => {
-                (t.text[1..t.text.len() - 1].to_string(), false)
+            Some(t) if t.kind == TokenKind::Str => {
+                match t.text.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+                    Some(path) => (path.to_string(), false),
+                    None => {
+                        self.error(span, "the `#include` file name has no closing quote");
+                        return;
+                    }
+                }
             }
             Some(t) if t.is(Punct::Lt) => {
                 let Some(close) = rest.iter().position(|t| t.is(Punct::Gt)) else {
@@ -384,11 +394,7 @@ impl Preprocessor<'_> {
             self.error(span, "`#if` needs an expression");
             return false;
         }
-        let mut eval = Eval {
-            tokens: &tokens,
-            pos: 0,
-            error: None,
-        };
+        let mut eval = Eval::new(&tokens);
         let value = eval.ternary();
         if eval.error.is_none() && eval.pos < tokens.len() {
             eval.error = Some((
@@ -401,7 +407,7 @@ impl Preprocessor<'_> {
                 self.error(at, message);
                 false
             }
-            None => value != 0,
+            None => value.is_true(),
         }
     }
 
@@ -663,15 +669,56 @@ fn intersect(a: &[u32], b: &[u32]) -> Vec<u32> {
         .collect()
 }
 
+/// The deepest nesting of an `#if` expression.
+const MAX_IF_DEPTH: usize = 64;
+
+/// A value in `#if`: 64 bits, signed or unsigned as in C.
+#[derive(Debug, Clone, Copy)]
+struct Value {
+    bits: u64,
+    unsigned: bool,
+}
+
+impl Value {
+    fn signed(value: i64) -> Value {
+        Value {
+            bits: value as u64,
+            unsigned: false,
+        }
+    }
+
+    fn truth(value: bool) -> Value {
+        Value::signed(i64::from(value))
+    }
+
+    fn is_true(self) -> bool {
+        self.bits != 0
+    }
+}
+
 /// Evaluates an integer expression for `#if`. Names that are left are 0.
 struct Eval<'a> {
     tokens: &'a [Token],
     pos: usize,
     error: Option<(Span, String)>,
+    depth: usize,
+    /// Above 0 inside an operand that is not evaluated, such as the right side of
+    /// `0 && x`. There a division by zero is not an error.
+    skip: usize,
 }
 
 impl Eval<'_> {
-    fn fail(&mut self, message: &str) -> i64 {
+    fn new(tokens: &[Token]) -> Eval<'_> {
+        Eval {
+            tokens,
+            pos: 0,
+            error: None,
+            depth: 0,
+            skip: 0,
+        }
+    }
+
+    fn fail(&mut self, message: &str) -> Value {
         if self.error.is_none() {
             let at = self
                 .tokens
@@ -683,7 +730,7 @@ impl Eval<'_> {
             }
         }
         self.pos = self.tokens.len();
-        0
+        Value::signed(0)
     }
 
     fn eat(&mut self, punct: Punct) -> bool {
@@ -692,20 +739,44 @@ impl Eval<'_> {
         found
     }
 
-    fn ternary(&mut self) -> i64 {
+    fn nested(&mut self, f: impl FnOnce(&mut Self) -> Value) -> Value {
+        if self.depth >= MAX_IF_DEPTH {
+            return self.fail("the `#if` expression is nested too deep");
+        }
+        self.depth += 1;
+        let value = f(self);
+        self.depth -= 1;
+        value
+    }
+
+    /// Evaluates `f` as an operand that is not used when `unused` is true.
+    fn operand(&mut self, unused: bool, f: impl FnOnce(&mut Self) -> Value) -> Value {
+        self.skip += usize::from(unused);
+        let value = f(self);
+        self.skip -= usize::from(unused);
+        value
+    }
+
+    fn ternary(&mut self) -> Value {
         let cond = self.binary(0);
         if !self.eat(Punct::Question) {
             return cond;
         }
-        let a = self.ternary();
-        if !self.eat(Punct::Colon) {
-            return self.fail("expected `:` in `#if`");
-        }
-        let b = self.ternary();
-        if cond != 0 { a } else { b }
+        self.nested(|e| {
+            let a = e.operand(!cond.is_true(), Self::ternary);
+            if !e.eat(Punct::Colon) {
+                return e.fail("expected `:` in `#if`");
+            }
+            let b = e.operand(cond.is_true(), Self::ternary);
+            let chosen = if cond.is_true() { a } else { b };
+            Value {
+                bits: chosen.bits,
+                unsigned: a.unsigned || b.unsigned,
+            }
+        })
     }
 
-    fn binary(&mut self, min: u8) -> i64 {
+    fn binary(&mut self, min: u8) -> Value {
         let mut lhs = self.unary();
         loop {
             let Some(TokenKind::Punct(op)) = self.tokens.get(self.pos).map(|t| t.kind) else {
@@ -718,43 +789,89 @@ impl Eval<'_> {
                 return lhs;
             }
             self.pos += 1;
-            let rhs = self.binary(level + 1);
-            lhs = match op {
-                Punct::OrOr => i64::from(lhs != 0 || rhs != 0),
-                Punct::AndAnd => i64::from(lhs != 0 && rhs != 0),
-                Punct::Pipe => lhs | rhs,
-                Punct::Caret => lhs ^ rhs,
-                Punct::Amp => lhs & rhs,
-                Punct::EqEq => i64::from(lhs == rhs),
-                Punct::NotEq => i64::from(lhs != rhs),
-                Punct::Lt => i64::from(lhs < rhs),
-                Punct::Gt => i64::from(lhs > rhs),
-                Punct::LtEq => i64::from(lhs <= rhs),
-                Punct::GtEq => i64::from(lhs >= rhs),
-                Punct::Shl => lhs.wrapping_shl(rhs as u32),
-                Punct::Shr => lhs.wrapping_shr(rhs as u32),
-                Punct::Plus => lhs.wrapping_add(rhs),
-                Punct::Minus => lhs.wrapping_sub(rhs),
-                Punct::Star => lhs.wrapping_mul(rhs),
-                Punct::Slash | Punct::Percent if rhs == 0 => {
-                    return self.fail("division by zero in `#if`");
-                }
-                Punct::Slash => lhs.wrapping_div(rhs),
-                _ => lhs.wrapping_rem(rhs),
+            let unused = match op {
+                Punct::AndAnd => !lhs.is_true(),
+                Punct::OrOr => lhs.is_true(),
+                _ => false,
+            };
+            let rhs = self.operand(unused, |e| e.binary(level + 1));
+            lhs = match self.apply(op, lhs, rhs) {
+                Some(value) => value,
+                None => return self.fail("division by zero in `#if`"),
             };
         }
     }
 
-    fn unary(&mut self) -> i64 {
+    /// Applies a binary operator; `None` is a division by zero in a used operand.
+    fn apply(&self, op: Punct, a: Value, b: Value) -> Option<Value> {
+        let unsigned = a.unsigned || b.unsigned;
+        let number = |bits: u64| Value { bits, unsigned };
+        let order = if unsigned {
+            a.bits.cmp(&b.bits)
+        } else {
+            (a.bits as i64).cmp(&(b.bits as i64))
+        };
+        let shift = b.bits.min(63) as u32;
+        Some(match op {
+            Punct::OrOr => Value::truth(a.is_true() || b.is_true()),
+            Punct::AndAnd => Value::truth(a.is_true() && b.is_true()),
+            Punct::Pipe => number(a.bits | b.bits),
+            Punct::Caret => number(a.bits ^ b.bits),
+            Punct::Amp => number(a.bits & b.bits),
+            Punct::EqEq => Value::truth(a.bits == b.bits),
+            Punct::NotEq => Value::truth(a.bits != b.bits),
+            Punct::Lt => Value::truth(order.is_lt()),
+            Punct::Gt => Value::truth(order.is_gt()),
+            Punct::LtEq => Value::truth(order.is_le()),
+            Punct::GtEq => Value::truth(order.is_ge()),
+            Punct::Shl => Value {
+                bits: a.bits << shift,
+                ..a
+            },
+            Punct::Shr if a.unsigned => Value {
+                bits: a.bits >> shift,
+                ..a
+            },
+            Punct::Shr => Value {
+                bits: ((a.bits as i64) >> shift) as u64,
+                ..a
+            },
+            Punct::Plus => number(a.bits.wrapping_add(b.bits)),
+            Punct::Minus => number(a.bits.wrapping_sub(b.bits)),
+            Punct::Star => number(a.bits.wrapping_mul(b.bits)),
+            Punct::Slash | Punct::Percent if b.bits == 0 => {
+                return (self.skip > 0).then_some(number(0));
+            }
+            Punct::Slash if unsigned => number(a.bits / b.bits),
+            Punct::Slash => number((a.bits as i64).wrapping_div(b.bits as i64) as u64),
+            _ if unsigned => number(a.bits % b.bits),
+            _ => number((a.bits as i64).wrapping_rem(b.bits as i64) as u64),
+        })
+    }
+
+    fn unary(&mut self) -> Value {
+        self.nested(Self::unary_inner)
+    }
+
+    fn unary_inner(&mut self) -> Value {
         let Some(t) = self.tokens.get(self.pos) else {
             return self.fail("`#if` ends too early");
         };
         self.pos += 1;
         match t.kind {
-            TokenKind::Punct(Punct::Minus) => self.unary().wrapping_neg(),
+            TokenKind::Punct(Punct::Minus) => {
+                let v = self.unary();
+                Value {
+                    bits: v.bits.wrapping_neg(),
+                    ..v
+                }
+            }
             TokenKind::Punct(Punct::Plus) => self.unary(),
-            TokenKind::Punct(Punct::Bang) => i64::from(self.unary() == 0),
-            TokenKind::Punct(Punct::Tilde) => !self.unary(),
+            TokenKind::Punct(Punct::Bang) => Value::truth(!self.unary().is_true()),
+            TokenKind::Punct(Punct::Tilde) => {
+                let v = self.unary();
+                Value { bits: !v.bits, ..v }
+            }
             TokenKind::Punct(Punct::LParen) => {
                 let v = self.ternary();
                 if self.eat(Punct::RParen) {
@@ -764,13 +881,13 @@ impl Eval<'_> {
                 }
             }
             TokenKind::Int => match parse_int(&t.text) {
-                Some(v) => v,
+                Some((bits, unsigned)) => Value { bits, unsigned },
                 None => {
                     self.pos -= 1;
                     self.fail("a bad integer in `#if`")
                 }
             },
-            TokenKind::Ident => 0,
+            TokenKind::Ident => Value::signed(0),
             _ => {
                 self.pos -= 1;
                 self.fail("unexpected token in `#if`")
@@ -796,8 +913,10 @@ fn binary_level(op: Punct) -> Option<u8> {
 }
 
 /// Parses a decimal, hex or octal integer with an optional `u` or `l` suffix.
-pub(crate) fn parse_int(text: &str) -> Option<i64> {
+/// Returns its bits and if it is unsigned: a `u` suffix, or too large for `i64`.
+pub(crate) fn parse_int(text: &str) -> Option<(u64, bool)> {
     let digits = text.trim_end_matches(['u', 'U', 'l', 'L']);
+    let suffix = &text[digits.len()..];
     let value = if let Some(hex) = digits
         .strip_prefix("0x")
         .or_else(|| digits.strip_prefix("0X"))
@@ -808,7 +927,10 @@ pub(crate) fn parse_int(text: &str) -> Option<i64> {
     } else {
         digits.parse::<u64>().ok()?
     };
-    Some(value as i64)
+    Some((
+        value,
+        suffix.contains(['u', 'U']) || value > i64::MAX as u64,
+    ))
 }
 
 #[cfg(test)]
@@ -1013,9 +1135,61 @@ mod tests {
 
     #[test]
     fn integers_in_if() {
-        assert_eq!(parse_int("0x1fU"), Some(31));
-        assert_eq!(parse_int("017"), Some(15));
-        assert_eq!(parse_int("0"), Some(0));
+        assert_eq!(parse_int("0x1fU"), Some((31, true)));
+        assert_eq!(parse_int("017"), Some((15, false)));
+        assert_eq!(parse_int("0"), Some((0, false)));
+        assert_eq!(parse_int("0xFFFFFFFFFFFFFFFF"), Some((u64::MAX, true)));
         assert_eq!(parse_int("9z"), None);
+    }
+
+    #[test]
+    fn logical_operators_and_the_conditional_short_circuit() {
+        let text = "#if defined(N) && 100 / N > 2\nno\n#elif 1 || 1 / 0\nyes\n#endif\n#if 1 ? 2 : 1 % 0\nyes\n#endif";
+        assert_eq!(run(text), "yes yes");
+        assert_eq!(errors("#if 1 && 1 / 0\n#endif").len(), 1);
+    }
+
+    #[test]
+    fn unsigned_operands_make_unsigned_arithmetic() {
+        assert_eq!(run("#if -1 > 0u\nyes\n#endif"), "yes");
+        assert_eq!(run("#if 0xFFFFFFFFFFFFFFFF > 0\nyes\n#endif"), "yes");
+        assert_eq!(run("#if -1 > 0\nno\n#endif"), "");
+        assert_eq!(
+            run("#if (0u - 1) >> 63 == 1 && -2 >> 1 == -1\nyes\n#endif"),
+            "yes"
+        );
+        assert_eq!(
+            run("#if -7 / 2 == -3 && -7 % 2 == -1 && 1 << 99 != 0\nyes\n#endif"),
+            "yes"
+        );
+    }
+
+    #[test]
+    fn deep_if_expressions_are_an_error_not_a_crash() {
+        let n = 100_000;
+        for expr in [
+            format!("{}1{}", "(".repeat(n), ")".repeat(n)),
+            format!("{}1", "- ".repeat(n)),
+            format!("{}1{}", "1 ? ".repeat(n), " : 1".repeat(n)),
+        ] {
+            let e = errors(&format!("#if {expr}\n#endif"));
+            assert!(e.iter().any(|m| m.contains("nested too deep")), "{e:?}");
+        }
+    }
+
+    #[test]
+    fn an_unclosed_include_name_is_an_error_not_a_panic() {
+        for text in ["#include \"é", "#include \"é\n", "#include \""] {
+            assert!(!errors(text).is_empty(), "{text}");
+        }
+    }
+
+    #[test]
+    fn the_error_directive_keeps_the_text_as_written() {
+        assert_eq!(
+            errors("#error unsupported: x-y  (now)"),
+            ["#error unsupported: x-y  (now)"]
+        );
+        assert_eq!(errors("#error"), ["#error"]);
     }
 }
