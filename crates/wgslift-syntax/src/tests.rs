@@ -285,6 +285,22 @@ fn errors_are_reported_and_parsing_goes_on() {
 }
 
 #[test]
+fn a_node_from_a_function_like_macro_covers_the_call() {
+    let parsed = parse(
+        "t.hlsl",
+        "#define GET(uv) tex2D(s, uv)\nvoid f() { x = GET(t); }",
+        Options::default(),
+    );
+    let Item::Function(f) = &parsed.unit.items[0] else {
+        panic!()
+    };
+    let StmtKind::Expr(e) = &f.body.as_ref().unwrap().stmts[0].kind else {
+        panic!()
+    };
+    assert_eq!(parsed.files.text(e.span), "x = GET(t)");
+}
+
+#[test]
 fn errors_in_macros_point_at_the_call() {
     let e = errors("#define BAD (1 +)\nvoid f() { x = BAD; }");
     assert_eq!(e.len(), 1);

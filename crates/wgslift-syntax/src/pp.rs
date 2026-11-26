@@ -490,7 +490,7 @@ impl Preprocessor<'_> {
                 }
             };
             let mac = Rc::clone(&self.macros[name]);
-            let site = t.token.site();
+            let mut site = t.token.site();
             if !self.spend(1 + mac.body.len(), site) {
                 continue;
             }
@@ -521,10 +521,16 @@ impl Preprocessor<'_> {
                         );
                         continue;
                     }
+                    // The call is the name through the `)`.
+                    site = site.to(close.token.site());
                     (args, insert(&intersect(&t.hide, &close.hide), id))
                 }
             };
-            let body = self.substitute(&mac, &args, &hide, site);
+            let mut body = self.substitute(&mac, &args, &hide, site);
+            // The replacement takes over the space before the macro name.
+            if let Some(first) = body.first_mut() {
+                first.token.space_before = t.token.space_before;
+            }
             for token in body.into_iter().rev() {
                 input.push_front(token);
             }
@@ -560,7 +566,7 @@ impl Preprocessor<'_> {
                         self.spend(args[p].len(), site);
                         args[p].clone()
                     }
-                    None => vec![PpToken::new(rhs.clone())],
+                    None => vec![PpToken::new(from_body(rhs, site))],
                 };
                 let empty_right = rhs.is_empty();
                 if empty_left {
@@ -579,7 +585,7 @@ impl Preprocessor<'_> {
             {
                 let bytes = args[p].iter().map(|a| a.token.text.len() + 1).sum();
                 if self.spend(bytes, site) {
-                    out.push(PpToken::new(stringify(&args[p], t)));
+                    out.push(PpToken::new(stringify(&args[p], &from_body(t, site))));
                 }
                 i += 2;
                 continue;
@@ -610,9 +616,7 @@ impl Preprocessor<'_> {
                     out.extend(arg);
                 }
                 None => {
-                    let mut token = t.clone();
-                    token.expanded_from = Some(site);
-                    out.push(PpToken::new(token));
+                    out.push(PpToken::new(from_body(t, site)));
                 }
             }
             i += 1;
@@ -689,6 +693,14 @@ fn collect_args(input: &mut VecDeque<PpToken>) -> Option<(Vec<Vec<PpToken>>, PpT
         args.last_mut().expect("never empty").push(t);
     }
     None
+}
+
+/// A copy of a macro body token that points at the call `site`.
+fn from_body(token: &Token, site: Span) -> Token {
+    Token {
+        expanded_from: Some(site),
+        ..token.clone()
+    }
 }
 
 fn stringify(arg: &[PpToken], hash: &Token) -> Token {
@@ -1147,6 +1159,24 @@ mod tests {
         text.push_str("m29");
         let (_, d) = run_with(&text, &mut NoIncludes);
         assert!(d.iter().any(|d| d.message.contains("more than")));
+    }
+
+    #[test]
+    fn a_macro_call_keeps_the_space_before_it() {
+        let text = "#define S(x) #x\n#define STR(x) S(x)\n#define X a\nSTR(float X) STR(X+X)";
+        assert_eq!(run(text), r#""float a" "a+a""#);
+    }
+
+    #[test]
+    fn every_token_from_a_macro_points_at_the_whole_call() {
+        let mut files = SourceFiles::default();
+        let text = "#define S(x) #x\n#define V(p) p ## value\n#define F(a) a ## y\nS(b) V() F()";
+        let main = files.add("main", text);
+        let mut d = Vec::new();
+        let tokens = preprocess(&mut files, main, &[], &mut NoIncludes, &mut d);
+        assert!(d.is_empty(), "{d:?}");
+        let sites: Vec<&str> = tokens.iter().map(|t| files.text(t.site())).collect();
+        assert_eq!(sites, ["S(b)", "V()", "F()"]);
     }
 
     #[test]
