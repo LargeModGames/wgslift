@@ -232,8 +232,8 @@ fn errors_name_the_problem() {
             "not a swizzle",
         ),
         (
-            "uniform float u;\nfloat main() : COLOR { u = 1; return u; }",
-            "cannot be written",
+            "static const float u = 1;\nfloat main() : COLOR { u = 2; return u; }",
+            "is written, but it is a uniform or a constant",
         ),
         ("float other() { return 1; }", "no entry point"),
     ];
@@ -241,4 +241,59 @@ fn errors_name_the_problem() {
         let e = errors(src);
         assert!(e.iter().any(|m| m.contains(expected)), "{src}: {e:?}");
     }
+}
+
+#[test]
+fn a_written_uniform_gets_a_private_copy_filled_at_entry() {
+    let m = ok("uniform float4 q;\nfloat main() : COLOR { q.x = 2; return q.x; }");
+    let uniform = m
+        .globals
+        .iter()
+        .position(|g| g.name == "q" && g.space == Space::Uniform);
+    let copy = m
+        .globals
+        .iter()
+        .find(|g| g.name == "q" && g.space == Space::Private);
+    let (Some(u), Some(copy)) = (uniform, copy) else {
+        panic!("{:?}", m.globals)
+    };
+    assert!(
+        matches!(copy.entry_init.as_ref().map(|e| &e.kind), Some(ExprKind::Var(Root::Global(g))) if *g == u)
+    );
+}
+
+#[test]
+fn a_matrix_plus_a_scalar_splats_the_scalar() {
+    let m = ok("float main() : COLOR { float2x2 r = 0; r = r - 0.5; r = r * 2; return r[0].x; }");
+    let ops: Vec<_> = entry_body(&m)
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::Assign(_, e) => match &e.kind {
+                ExprKind::Binary(_, a, b) => Some((a.ty.clone(), b.ty.clone())),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    let mat = Type::Matrix { rows: 2, cols: 2 };
+    assert_eq!(ops, [(mat.clone(), mat.clone()), (mat, Type::FLOAT)]);
+}
+
+#[test]
+fn predeclared_units_are_visible_in_the_values_of_source_globals() {
+    let source = wgslift_syntax::parse(
+        "t.hlsl",
+        "static const float k = q1 * 2;\nfloat main() : COLOR { return k; }",
+        Default::default(),
+    );
+    let extra = wgslift_syntax::parse("<p>", "uniform float q1;", Default::default());
+    let dialect = Dialect::d3d9_legacy();
+    let settings = Settings {
+        stage: Stage::Fragment,
+        entry_point: "main",
+        dialect: &dialect,
+    };
+    let mut d = Vec::new();
+    let m = analyze(&[source.unit, extra.unit], &settings, &mut d);
+    assert!(m.is_some(), "{d:?}");
 }

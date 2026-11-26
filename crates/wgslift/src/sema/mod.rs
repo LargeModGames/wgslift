@@ -73,7 +73,13 @@ pub(crate) fn analyze(
         errors: false,
     };
     let _ = settings.stage;
-    let items: Vec<&Item> = units.iter().flat_map(|u| &u.items).collect();
+    // Predeclared units come first: the source can use them anywhere, also in the
+    // values of its globals.
+    let items: Vec<&Item> = units[1..]
+        .iter()
+        .chain(&units[..1])
+        .flat_map(|u| &u.items)
+        .collect();
     for item in &items {
         match item {
             Item::Struct(s) => a.declare_struct(s),
@@ -577,6 +583,26 @@ impl Analyzer<'_> {
             }
             if global.space == Space::Const && global.init.is_none() {
                 global.space = Space::Private;
+            }
+            if is_written && global.space == Space::Uniform && self.dialect.writable_globals {
+                // Direct3D 9 lets a shader write a uniform: it writes its own copy.
+                let uniform = self.module.globals.len();
+                let ty = global.ty.clone();
+                self.module.globals.push(global);
+                let index = self.module.globals.len();
+                self.module.globals.push(ir::Global {
+                    name: name.clone(),
+                    ty: ty.clone(),
+                    space: Space::Private,
+                    init: None,
+                    entry_init: Some(Expr {
+                        kind: ExprKind::Var(Root::Global(uniform)),
+                        ty,
+                    }),
+                    span: d.span,
+                });
+                self.globals.insert(name, index);
+                continue;
             }
             if is_written && matches!(global.space, Space::Uniform | Space::Const) {
                 self.error(

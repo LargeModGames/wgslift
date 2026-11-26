@@ -734,12 +734,14 @@ impl Analyzer<'_> {
             let is_scale = matches!(bop, BinaryOp::Mul)
                 && (shape(&a.ty) == Some(Shape::Scalar) || shape(&b.ty) == Some(Shape::Scalar));
             if !compare && (matches!(bop, BinaryOp::Add | BinaryOp::Sub) || is_scale) {
-                let a = if shape(&a.ty) == Some(Shape::Scalar) {
+                // WGSL scales a matrix by a scalar, but adds only matrices.
+                let keep_scalar = |e: &Expr| is_scale && shape(&e.ty) == Some(Shape::Scalar);
+                let a = if keep_scalar(&a) {
                     self.convert(a, &Type::FLOAT, span, false)
                 } else {
                     self.convert(a, &ty, span, false)
                 };
-                let b = if shape(&b.ty) == Some(Shape::Scalar) {
+                let b = if keep_scalar(&b) {
                     self.convert(b, &Type::FLOAT, span, false)
                 } else {
                     self.convert(b, &ty, span, false)
