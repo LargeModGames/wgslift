@@ -3,5 +3,9 @@
 version = 4
 
 [[package]]
+name = "wgslift"
+version = "0.0.0"
+
+[[package]]
 name = "wgslift-syntax"
 version = "0.0.0"

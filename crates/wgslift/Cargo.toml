@@ -1,0 +1,16 @@
+[package]
+name = "wgslift"
+description = "Translates Direct3D 9 era HLSL shaders to WGSL"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+keywords = ["hlsl", "wgsl", "shader", "translator", "wgpu"]
+categories = ["graphics", "rendering", "compilers"]
+
+
+[lints]
+workspace = true
