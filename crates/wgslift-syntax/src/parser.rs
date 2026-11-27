@@ -1467,7 +1467,7 @@ mod tests {
                 parsed
                     .diagnostics
                     .iter()
-                    .any(|d| d.message.contains("nested more than")),
+                    .any(|d| d.message.contains("the expression is nested more than")),
                 "{:?}",
                 parsed.diagnostics
             );
