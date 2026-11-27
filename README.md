@@ -7,7 +7,7 @@ into WGSL for `wgpu` and WebGPU.
 
 ## Status
 
-Early development. Nothing is published on crates.io yet.
+Early development: the API can change between releases.
 
 - `wgslift-syntax`: the preprocessor, the lexer and the parser.
 - `wgslift`: type checking, the HLSL intrinsics, and a WGSL writer with a reflection
