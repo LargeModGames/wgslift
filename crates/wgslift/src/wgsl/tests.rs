@@ -1157,3 +1157,15 @@ fn the_reflection_gives_array_strides_and_struct_fields() {
     );
     assert_eq!(light.members[2].stride, Some(16));
 }
+#[test]
+fn an_empty_struct_uniform_takes_sixteen_bytes() {
+    let (_, reflection) =
+        translate_valid("struct E {}; E e; float f; float4 main() : COLOR0 { E x = e; return f; }");
+    let buffer = reflection.uniform_buffer.unwrap();
+    let offsets: Vec<(u32, u32)> = buffer.members.iter().map(|m| (m.offset, m.size)).collect();
+    assert_eq!(offsets, [(0, 16), (16, 4)]);
+    let (_, reflection) =
+        translate_valid("struct E {}; E a[2]; float4 main() : COLOR0 { E x = a[1]; return 0; }");
+    let buffer = reflection.uniform_buffer.unwrap();
+    assert_eq!(buffer.members[0].stride, Some(16));
+}

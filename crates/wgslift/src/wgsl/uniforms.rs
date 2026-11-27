@@ -181,7 +181,11 @@ impl Uniforms {
                         .iter()
                         .map(|f| self.repr(module, &f.ty, names, namer))
                         .collect();
-                    let (members, layout) = self.lay_out(fields);
+                    let (members, mut layout) = self.lay_out(fields);
+                    if members.is_empty() {
+                        // The printed struct holds one `pad: u32`.
+                        layout = (4, 4);
+                    }
                     let plain = members.iter().all(|m| {
                         m.align_attr.is_none() && m.size_attr.is_none() && !self.converts(&m.repr)
                     });
