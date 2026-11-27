@@ -25,3 +25,24 @@ on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project us
     (`MAX_TREE_DEPTH`), macro expansion work (`MAX_EXPANSION_WORK`), `#if` nesting,
     include depth (`MAX_INCLUDE_DEPTH`) and included files (`MAX_INCLUDES`).
 - The `milkdrop_corpus` example parses every shader in a folder of MilkDrop presets.
+- `wgslift`: a translator from Direct3D 9 pixel shaders (shader models 2 and 3) to
+  WGSL.
+  - `translate` with `Options`: the entry point, macros, a prelude, predeclared
+    names, an `IncludeResolver`, and the `Dialect` of older compilers
+    (`Dialect::d3d9_legacy`, the default: the absolute value in `pow`, `log` and
+    `sqrt`, writable uniforms, `for` variables visible after the loop, and the
+    `Uniformity` policy for derivatives in non-uniform control flow).
+  - Type checking with the HLSL conversion rules, overload resolution, the HLSL
+    intrinsics, `out` and `inout` arguments (swizzles included), static locals set
+    once when the shader starts, and constant folding of values that leave the
+    finite range.
+  - `Output` with the WGSL text and a `Reflection`: the WGSL entry-point name, the
+    uniform buffer layout (offsets, array strides and struct fields), the texture
+    and sampler bindings, and the entry inputs and outputs. `Failed` holds the
+    diagnostics with their source spans.
+  - `Options::loop_limit`: a budget of loop passes per invocation, summed over all
+    loops, for untrusted shaders.
+  - Limits for hostile input: array and struct sizes, constant integer overflow,
+    and deep expressions, which are split into `let` and `const` temporaries.
+- The `milkdrop_translate` example translates every shader in a folder of MilkDrop
+  presets and checks the WGSL with naga and, with `--tint`, with Tint.
