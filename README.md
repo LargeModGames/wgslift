@@ -17,6 +17,10 @@ Direct3D 9 pixel shaders translate today. Of the 15,895 shaders in a large MilkD
 preset collection, 15,892 translate to WGSL that both naga and Tint accept. The 3
 that fail are not valid HLSL. Vertex shaders and later shader models come next.
 
+```toml
+wgslift = "0.1"
+```
+
 ```rust
 let options = wgslift::Options {
     entry_point: "main".to_string(),
