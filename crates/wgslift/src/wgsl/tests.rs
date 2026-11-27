@@ -1185,3 +1185,13 @@ fn a_deep_module_scope_initializer_is_split_into_consts() {
     ));
     assert!(text.contains("const t = "), "{text}");
 }
+#[test]
+fn many_same_named_locals_are_named_quickly() {
+    let mut namer = Namer::default();
+    for n in 0..100_000 {
+        let name = namer.name("v");
+        if n > 0 {
+            assert_eq!(name, format!("v_{n}"));
+        }
+    }
+}

@@ -1,6 +1,6 @@
 //! WGSL names: the words a declaration must not use, and a namer per scope.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// WGSL keywords and reserved words (WGSL 16.1 and 16.2).
 const RESERVED: &[&str] = &[
@@ -454,6 +454,8 @@ fn is_unsafe_member(name: &str) -> bool {
 #[derive(Debug, Clone, Default)]
 pub(super) struct Namer {
     used: HashSet<String>,
+    /// For each stem, the lowest number suffix that may still be free.
+    next: HashMap<String, usize>,
     members: bool,
 }
 
@@ -461,8 +463,8 @@ impl Namer {
     /// A namer for struct members.
     pub(super) fn members() -> Namer {
         Namer {
-            used: HashSet::new(),
             members: true,
+            ..Namer::default()
         }
     }
 
@@ -484,10 +486,15 @@ impl Namer {
             stem.push('_');
         }
         let mut candidate = stem.clone();
-        let mut n = 1;
-        while self.used.contains(&candidate) {
-            candidate = format!("{stem}_{n}");
-            n += 1;
+        if self.used.contains(&candidate) {
+            let n = self.next.entry(stem.clone()).or_insert(1);
+            loop {
+                candidate = format!("{stem}_{n}");
+                *n += 1;
+                if !self.used.contains(&candidate) {
+                    break;
+                }
+            }
         }
         self.used.insert(candidate.clone());
         candidate
