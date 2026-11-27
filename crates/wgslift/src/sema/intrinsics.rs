@@ -140,6 +140,9 @@ fn componentwise(name: &str, arity: usize) -> Option<(&'static str, Elem, bool)>
         ("sin", 1) => ("sin", Float, false),
         ("cos", 1) => ("cos", Float, false),
         ("tan", 1) => ("tan", Float, false),
+        ("sinh", 1) => ("sinh", Float, false),
+        ("cosh", 1) => ("cosh", Float, false),
+        ("tanh", 1) => ("tanh", Float, false),
         ("asin", 1) => ("asin", Float, false),
         ("acos", 1) => ("acos", Float, false),
         ("atan", 1) => ("atan", Float, false),
@@ -1110,6 +1113,16 @@ mod tests {
             let x = local(0, float(2));
             let expected = call(wgsl, vec![x.clone()], float(2));
             assert_eq!(done(&mut cx, hlsl, vec![x]), expected, "{hlsl}");
+        }
+    }
+
+    #[test]
+    fn hyperbolic_intrinsics_map_to_their_wgsl_names() {
+        for name in ["sinh", "cosh", "tanh"] {
+            let mut cx = Mock::modern();
+            let x = local(0, float(3));
+            let expected = call(name, vec![x.clone()], float(3));
+            assert_eq!(done(&mut cx, name, vec![x]), expected, "{name}");
         }
     }
 
