@@ -1169,3 +1169,11 @@ fn an_empty_struct_uniform_takes_sixteen_bytes() {
     let buffer = reflection.uniform_buffer.unwrap();
     assert_eq!(buffer.members[0].stride, Some(16));
 }
+#[test]
+fn the_lowest_switch_label_prints_as_valid_wgsl() {
+    let (text, _) = translate_valid(
+        "float4 main(float2 uv : TEXCOORD0) : COLOR0 { int i = (int)uv.x; \
+         switch (i) { case 0x80000000: return 1; default: return 0; } }",
+    );
+    assert!(text.contains("case i32(-2147483648) {"), "{text}");
+}

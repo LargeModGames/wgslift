@@ -227,7 +227,7 @@ impl<'p, 'm> Body<'p, 'm> {
                     let labels: Vec<String> = labels
                         .iter()
                         .map(|label| match label {
-                            Some(value) => format!("{}i", *value as i32),
+                            Some(value) => literal_text(Literal::Int(*value as i32)).0,
                             None => {
                                 has_default = true;
                                 "default".to_string()
