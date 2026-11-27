@@ -1416,6 +1416,11 @@ impl Analyzer<'_> {
                     call_args.push(Arg::Value(self.convert(v, &p.ty, span, false)));
                 }
                 (dir, Some(a)) => {
+                    if !self.in_function() {
+                        return Err(
+                            self.error(a.span, "this is not allowed in the value of a global")
+                        );
+                    }
                     let target = self.place(a)?;
                     let init = if dir == ParamDir::InOut {
                         let current = self.read(&target);
@@ -1499,12 +1504,8 @@ impl Lowerer for Analyzer<'_> {
         self.snapshot(value)
     }
 
-    fn emit(&mut self, stmt: Stmt) {
-        if self.in_function() {
-            self.state().pre.push(stmt);
-        } else {
-            self.errors = true;
-        }
+    fn emit(&mut self, stmt: Stmt, span: Span) {
+        self.emit_stmt(stmt, span);
     }
 
     fn use_sampler(&mut self, global: usize, dim: SamplerDim, span: Span) -> bool {

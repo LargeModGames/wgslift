@@ -452,3 +452,18 @@ fn a_constant_integer_that_overflows_is_an_error() {
         );
     }
 }
+
+#[test]
+fn a_write_in_the_value_of_a_global_is_an_error_with_a_message() {
+    for value in ["modf(1.5, g)", "f(g)", "(clip(-1.0), 1.0)"] {
+        let src = format!(
+            "static float g;\nfloat f(inout float x) {{ x = 1; return 2; }}\n\
+             static float h = {value};\nfloat4 main() : COLOR {{ return h; }}"
+        );
+        let e = errors(&src);
+        assert!(
+            e.iter().any(|m| m.contains("value of a global")),
+            "{src}: {e:?}"
+        );
+    }
+}

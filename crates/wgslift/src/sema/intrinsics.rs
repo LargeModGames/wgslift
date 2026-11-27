@@ -635,7 +635,7 @@ fn modf(cx: &mut dyn Lowerer, args: Vec<IntrinsicArg>, span: Span) -> Option<Exp
     let x = cx.temp(x);
     let whole = cx.temp(call("trunc", vec![x.clone()], x.ty.clone()));
     let stored = cx.coerce(whole.clone(), &ip.value.ty, ip.span);
-    cx.emit(Stmt::Assign(place, stored));
+    cx.emit(Stmt::Assign(place, stored), ip.span);
     let ty = x.ty.clone();
     Some(binary(BinaryOp::Sub, x, whole, ty))
 }
@@ -656,7 +656,7 @@ fn sincos(cx: &mut dyn Lowerer, args: Vec<IntrinsicArg>, span: Span) -> Option<E
     for (wgsl, place, out) in [("sin", sin_place, s), ("cos", cos_place, c)] {
         let value = call(wgsl, vec![x.clone()], x.ty.clone());
         let value = cx.coerce(value, &out.value.ty, out.span);
-        cx.emit(Stmt::Assign(place, value));
+        cx.emit(Stmt::Assign(place, value), out.span);
     }
     Some(void())
 }
@@ -666,7 +666,7 @@ fn clip(cx: &mut dyn Lowerer, args: Vec<IntrinsicArg>, span: Span) -> Option<Exp
     let (shape, scalar) = common(cx, "clip", &args, Elem::Float, span)?;
     let x = fit(cx, args, shape, scalar).pop().unwrap();
     let cond = reduce(cx, "any", BinaryOp::Or, BinaryOp::Lt, x);
-    cx.emit(Stmt::If(cond, vec![Stmt::Discard], Vec::new()));
+    cx.emit(Stmt::If(cond, vec![Stmt::Discard], Vec::new()), span);
     Some(void())
 }
 
@@ -954,7 +954,7 @@ mod tests {
             local(id, ty)
         }
 
-        fn emit(&mut self, stmt: Stmt) {
+        fn emit(&mut self, stmt: Stmt, _span: Span) {
             self.stmts.push(stmt);
         }
 

@@ -51,7 +51,8 @@ pub(crate) trait Lowerer {
     fn temp(&mut self, value: Expr) -> Expr;
 
     /// Adds a statement before the current statement, for example a `discard`.
-    fn emit(&mut self, stmt: Stmt);
+    /// Outside a function it reports an error at `span`.
+    fn emit(&mut self, stmt: Stmt, span: Span);
 
     /// Records that sampler global `global` is used with dimension `dim`. A plain
     /// `sampler` takes the dimension of its first use. Returns false after an
