@@ -583,3 +583,16 @@ fn a_sampler_in_a_struct_is_an_error() {
         );
     }
 }
+
+#[test]
+fn a_type_with_too_many_elements_is_an_error() {
+    let cases = [
+        "float b[65536][65536];\nfloat4 main() : COLOR { return b[1][1]; }",
+        "struct E {};\nstatic E a[65536][65536] = {};\nfloat4 main() : COLOR { return 0; }",
+        "struct S0 { float a[65536]; };\nstruct S1 { S0 a, b; };\nfloat4 main() : COLOR { return 0; }",
+    ];
+    for src in cases {
+        let e = errors(src);
+        assert!(e.iter().any(|m| m.contains("too large")), "{src}: {e:?}");
+    }
+}

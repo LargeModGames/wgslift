@@ -21,6 +21,9 @@ use crate::ir::{self, Expr, ExprKind, ParamDir, Root, Space, Stmt};
 use crate::types::{Precision, SamplerDim, Scalar, Type};
 use crate::{Dialect, Stage};
 
+/// The most elements a type can hold, counted through arrays and structs.
+const MAX_ELEMENTS: u64 = 65536;
+
 /// What the analysis needs from the options.
 pub(crate) struct Settings<'a> {
     /// The stage of the entry point.
@@ -254,7 +257,24 @@ impl Analyzer<'_> {
             }
             ty = Type::Array(Box::new(ty), n as u32);
         }
+        if self.elements(&ty) > MAX_ELEMENTS {
+            return Err(self.error(span, "this array is too large"));
+        }
         Ok(ty)
+    }
+
+    /// The number of elements in a value of `ty`, through arrays and structs.
+    fn elements(&self, ty: &Type) -> u64 {
+        match ty {
+            Type::Array(e, n) => u64::from(*n).saturating_mul(self.elements(e)),
+            Type::Struct(s) => self.module.structs[*s]
+                .fields
+                .iter()
+                .map(|f| self.elements(&f.ty))
+                .fold(0, u64::saturating_add)
+                .max(1),
+            _ => 1,
+        }
     }
 
     /// Evaluates a constant integer: literals, integer constants and arithmetic.
@@ -339,6 +359,13 @@ impl Analyzer<'_> {
             name: s.name.name.clone(),
             fields,
         });
+        if self.elements(&Type::Struct(index)) > MAX_ELEMENTS {
+            self.error(
+                s.name.span,
+                format!("the struct `{}` is too large", s.name.name),
+            );
+            self.module.structs[index].fields.clear();
+        }
         self.types.insert(s.name.name.clone(), Type::Struct(index));
     }
 
