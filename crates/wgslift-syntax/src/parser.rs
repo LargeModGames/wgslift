@@ -369,6 +369,7 @@ impl Parser<'_> {
         })
     }
 
+    /// Parses a type. Leaves the depth of its deepest expression argument in `tree_depth`.
     fn type_ref(&mut self) -> PResult<TypeRef> {
         let name = self.ident().map_err(|_| {
             self.diagnostics.pop();
@@ -376,6 +377,7 @@ impl Parser<'_> {
         })?;
         let mut args = Vec::new();
         let mut span = name.span;
+        let mut deepest = 0;
         if is_template_type(&name.name) && self.eat(Punct::Lt) {
             let close;
             (args, close) = self.nested(|p| {
@@ -387,6 +389,7 @@ impl Parser<'_> {
                         // Above the comparisons and shifts, so that `>` closes the list.
                         args.push(TypeArg::Expr(p.binary(8)?));
                     }
+                    deepest = deepest.max(p.tree_depth);
                     if let Some(close) = p.eat_gt() {
                         return Ok((args, close));
                     }
@@ -395,6 +398,7 @@ impl Parser<'_> {
             })?;
             span = span.to(close);
         }
+        self.tree_depth = deepest;
         Ok(TypeRef { span, name, args })
     }
 
@@ -1253,10 +1257,11 @@ impl Parser<'_> {
         let start = self.here();
         self.pos += 1;
         let ty = self.type_ref()?;
+        let ty_depth = self.tree_depth;
         self.expect(Punct::RParen)?;
         let operand = self.unary()?;
         let span = start.to(operand.span);
-        let depth = self.tree_depth;
+        let depth = ty_depth.max(self.tree_depth);
         self.node(ExprKind::Cast(Box::new(ty), Box::new(operand)), span, depth)
     }
 
@@ -1361,12 +1366,13 @@ impl Parser<'_> {
             || (next.is_some_and(|n| n.is(Punct::Lt)) && is_template_type(&t.text));
         if constructor && self.is_type(Some(&t)) {
             let ty = self.type_ref()?;
+            let ty_depth = self.tree_depth;
             if !self.at(Punct::LParen) {
                 return Err(self.expected("`(`"));
             }
             let args = self.call_args()?;
             let span = self.since(span);
-            let depth = self.tree_depth;
+            let depth = ty_depth.max(self.tree_depth);
             return self.node(ExprKind::Construct(Box::new(ty), args), span, depth);
         }
         self.pos += 1;
@@ -1440,4 +1446,31 @@ fn binary_op(punct: Punct) -> Option<(u8, BinaryOp)> {
         Punct::Percent => (9, BinaryOp::Rem),
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{Options, parse};
+
+    #[test]
+    fn template_arguments_count_toward_the_tree_depth() {
+        let mut construct = "0".to_string();
+        let mut cast = "0".to_string();
+        for _ in 0..30 {
+            construct = format!("vector<float, 0+{construct}{}>(0)", "+0".repeat(250));
+            cast = format!("(vector<float, 0+{cast}{}>)0", "+0".repeat(250));
+        }
+        for e in [construct, cast] {
+            let text = format!("static float4 v = {e};");
+            let parsed = parse("t.hlsl", &text, Options::default());
+            assert!(
+                parsed
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.message.contains("nested more than")),
+                "{:?}",
+                parsed.diagnostics
+            );
+        }
+    }
 }
