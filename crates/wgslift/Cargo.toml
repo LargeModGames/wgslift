@@ -12,7 +12,7 @@ keywords = ["hlsl", "wgsl", "shader", "translator", "wgpu"]
 categories = ["graphics", "rendering", "compilers"]
 
 [dependencies]
-wgslift-syntax = { path = "../wgslift-syntax", version = "0.0.0" }
+wgslift-syntax = { path = "../wgslift-syntax", version = "0.1.0" }
 
 [dev-dependencies]
 naga = { version = "30.0.2", default-features = false, features = ["wgsl-in"] }

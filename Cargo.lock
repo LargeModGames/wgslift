@@ -250,7 +250,7 @@ checksum = "ca718471876992059f251e33aafc334346ada08042b7661dd1fe313a9bced557"
 
 [[package]]
 name = "wgslift"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "naga",
  "wgslift-syntax",
@@ -258,7 +258,7 @@ dependencies = [
 
 [[package]]
 name = "wgslift-syntax"
-version = "0.0.0"
+version = "0.1.0"
 
 [[package]]
 name = "zerocopy"
