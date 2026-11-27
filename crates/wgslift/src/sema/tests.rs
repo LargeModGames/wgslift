@@ -596,3 +596,15 @@ fn a_type_with_too_many_elements_is_an_error() {
         assert!(e.iter().any(|m| m.contains("too large")), "{src}: {e:?}");
     }
 }
+
+#[test]
+fn a_prototype_and_its_definition_are_one_function() {
+    let m = ok(
+        "float f(float x);\nfloat4 main(float2 uv : TEXCOORD0) : COLOR0;\n\
+         float4 main(float2 uv : TEXCOORD0) : COLOR0 { return f(uv.x); }\n\
+         float f(float y) { return y * 2; }",
+    );
+    assert_eq!(m.functions.len(), 2);
+    let f = m.functions.iter().find(|f| f.name == "f").unwrap();
+    assert_eq!(f.locals[f.params[0].local].name, "y");
+}

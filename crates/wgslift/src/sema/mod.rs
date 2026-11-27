@@ -93,7 +93,15 @@ pub(crate) fn analyze(
     let mut declared = Vec::new();
     for item in &items {
         if let Item::Function(f) = item {
-            declared.push((a.declare_function(f), f));
+            let index = a.declare_function(f);
+            match declared
+                .iter_mut()
+                .find(|(i, _)| index.is_some() && *i == index)
+            {
+                Some(entry) if f.body.is_some() => entry.1 = f,
+                Some(_) => {}
+                None => declared.push((index, f)),
+            }
         }
     }
     let written = a.written_names(&items);
@@ -415,6 +423,30 @@ impl Analyzer<'_> {
             });
         }
         let name = f.name.name.clone();
+        // A prototype and the definition with the same parameters are one function.
+        let same = self.functions.get(&name).and_then(|overloads| {
+            overloads.iter().copied().find(|&i| {
+                let s = &self.signatures[i];
+                (!s.has_body || f.body.is_none())
+                    && s.ret == ret
+                    && s.params.len() == params.len()
+                    && s.params
+                        .iter()
+                        .zip(&params)
+                        .all(|(a, b)| a.ty == b.ty && a.dir == b.dir)
+            })
+        });
+        if let Some(index) = same {
+            let sig = &mut self.signatures[index];
+            if f.body.is_some() {
+                for (new, old) in params.iter_mut().zip(&sig.params) {
+                    new.default = new.default.take().or_else(|| old.default.clone());
+                }
+                sig.params = params;
+                sig.has_body = true;
+            }
+            return Some(index);
+        }
         let index = self.signatures.len();
         self.signatures.push(Signature {
             name: name.clone(),
