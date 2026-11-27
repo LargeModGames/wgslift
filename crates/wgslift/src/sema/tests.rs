@@ -629,6 +629,8 @@ fn constant_math_out_of_range_still_creates_a_shader() {
         "exp2(k) * 2",
         "pow(10.0, 50.0)",
         "(float4)exp(89.0)",
+        "acos(2.0)",
+        "0.0 / 0.0",
     ];
     for value in values {
         let src =
