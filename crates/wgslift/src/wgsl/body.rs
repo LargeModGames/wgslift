@@ -29,8 +29,8 @@ pub(super) struct Body<'p, 'm> {
     namer: Namer,
     /// `let` lines that must come before the statement being printed.
     lets: Vec<String>,
-    /// Module scope cannot hold `let` lines.
-    hoist: bool,
+    /// The keyword of those lines: module scope holds `const` lines instead.
+    hoist: &'static str,
     out: String,
 }
 
@@ -38,8 +38,13 @@ impl<'p, 'm> Body<'p, 'm> {
     /// A printer for module-scope initializers.
     pub(super) fn module_scope(p: &'p Printer<'m>) -> Body<'p, 'm> {
         let mut body = Body::detached(p);
-        body.hoist = false;
+        body.hoist = "const";
         body
+    }
+
+    /// The names this scope took, the module's included.
+    pub(super) fn into_namer(self) -> Namer {
+        self.namer
     }
 
     /// A printer for a scope without locals, such as the entry wrapper.
@@ -51,7 +56,7 @@ impl<'p, 'm> Body<'p, 'm> {
             pointer: Vec::new(),
             namer: p.names.module.clone(),
             lets: Vec::new(),
-            hoist: true,
+            hoist: "let",
             out: String::new(),
         }
     }
@@ -325,10 +330,10 @@ impl<'p, 'm> Body<'p, 'm> {
     /// The text of an expression, and whether it is a primary expression.
     fn expr(&mut self, e: &Expr, depth: usize) -> (String, bool) {
         let leaf = matches!(e.kind, ExprKind::Literal(_) | ExprKind::Var(_));
-        if self.hoist && depth > MAX_DEPTH && !leaf {
+        if depth > MAX_DEPTH && !leaf {
             let text = self.top(e);
             let name = self.namer.name("t");
-            self.lets.push(format!("let {name} = {text};"));
+            self.lets.push(format!("{} {name} = {text};", self.hoist));
             return (name, true);
         }
         if matches!(

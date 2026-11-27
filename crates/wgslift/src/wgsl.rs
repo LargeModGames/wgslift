@@ -154,7 +154,7 @@ impl<'m> Printer<'m> {
         self.print_structs(&mut out);
         out.push_str(&self.uniforms.decls);
         self.print_textures(&mut out, &mut reflection);
-        self.print_globals(&mut out);
+        self.names.module = self.print_globals(&mut out);
         if let Some((name, _)) = &self.names.loop_budget {
             let _ = writeln!(out, "var<private> {name}: u32;\n");
         }
@@ -227,7 +227,10 @@ impl<'m> Printer<'m> {
         }
     }
 
-    fn print_globals(&self, out: &mut String) {
+    /// Prints the private and const globals and returns the module names with the
+    /// `const` temporaries their values need.
+    fn print_globals(&self, out: &mut String) -> Namer {
+        let mut body = Body::module_scope(self);
         let mut any = false;
         for (i, g) in self.module.globals.iter().enumerate() {
             let keyword = match g.space {
@@ -237,7 +240,10 @@ impl<'m> Printer<'m> {
             };
             any = true;
             let ty = self.ty(&g.ty);
-            let init = g.init.as_ref().map(|e| Body::module_scope(self).top(e));
+            let init = g.init.as_ref().map(|e| body.top(e));
+            for line in body.take_lets() {
+                let _ = writeln!(out, "{line}");
+            }
             let init = match (init, g.space) {
                 (Some(init), _) => format!(" = {init}"),
                 (None, Space::Const) => format!(" = {ty}()"),
@@ -248,5 +254,6 @@ impl<'m> Printer<'m> {
         if any {
             out.push('\n');
         }
+        body.into_namer()
     }
 }

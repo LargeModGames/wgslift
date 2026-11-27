@@ -1177,3 +1177,11 @@ fn the_lowest_switch_label_prints_as_valid_wgsl() {
     );
     assert!(text.contains("case i32(-2147483648) {"), "{text}");
 }
+#[test]
+fn a_deep_module_scope_initializer_is_split_into_consts() {
+    let terms = vec!["1.0"; 255].join("+");
+    let (text, _) = translate_valid(&format!(
+        "static const float k = {terms};\nfloat4 main() : COLOR0 {{ return k; }}"
+    ));
+    assert!(text.contains("const t = "), "{text}");
+}
