@@ -608,3 +608,30 @@ fn a_prototype_and_its_definition_are_one_function() {
     let f = m.functions.iter().find(|f| f.name == "f").unwrap();
     assert_eq!(f.locals[f.params[0].local].name, "y");
 }
+
+#[test]
+fn constant_math_out_of_range_still_creates_a_shader() {
+    let values = [
+        "exp(89.0)",
+        "log(0.0)",
+        "sqrt(-1.0) + 1",
+        "exp2(k) * 2",
+        "pow(10.0, 50.0)",
+        "(float4)exp(89.0)",
+    ];
+    for value in values {
+        let src =
+            format!("static const float k = 200.0;\nfloat4 main() : COLOR0 {{ return {value}; }}");
+        let output = crate::translate("t.hlsl", &src, Default::default())
+            .unwrap_or_else(|f| panic!("{src}: {f}"));
+        let wgsl = &output.wgsl;
+        let module = naga::front::wgsl::parse_str(wgsl)
+            .unwrap_or_else(|e| panic!("{src}\n{}\n{wgsl}", e.emit_to_string(wgsl)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::default(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("{src}\n{}\n{wgsl}", e.emit_to_string(wgsl)));
+    }
+}

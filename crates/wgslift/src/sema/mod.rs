@@ -131,6 +131,7 @@ pub(crate) fn analyze(
         return None;
     }
     a.module.entry = entry;
+    fold_non_finite(&mut a.module);
     Some(prune(a.module))
 }
 
@@ -868,6 +869,113 @@ pub(crate) fn is_const_expr(e: &Expr, globals: &[ir::Global]) -> bool {
             !name.starts_with("dpd") && !name.starts_with("fwidth") && all(args)
         }
     }
+}
+
+/// Replaces each float const-expression whose value is infinite or NaN with a
+/// literal, which the printer keeps finite: WGSL evaluates const-expressions when
+/// it creates the shader and rejects such a value, where fxc folds it.
+fn fold_non_finite(module: &mut ir::Module) {
+    let mut values = Vec::with_capacity(module.globals.len());
+    for global in &mut module.globals {
+        for value in global.init.iter_mut().chain(global.entry_init.iter_mut()) {
+            visit_expr_mut(value, &|e| fold_here(e, &values));
+        }
+        let value = match (&global.init, global.space) {
+            (Some(init), Space::Const) => const_float(init, &values),
+            _ => None,
+        };
+        values.push(value);
+    }
+    for f in &mut module.functions {
+        visit_block_mut(&mut f.body, &|e| fold_here(e, &values), &|_| {});
+    }
+}
+
+fn fold_here(e: &mut Expr, values: &[Option<f32>]) {
+    if matches!(e.kind, ExprKind::Literal(_)) {
+        return;
+    }
+    let Some(v) = const_float(e, values).filter(|v| !v.is_finite()) else {
+        return;
+    };
+    let literal = Expr {
+        kind: ExprKind::Literal(ir::Literal::Float(v)),
+        ty: Type::FLOAT,
+    };
+    e.kind = match e.ty {
+        Type::Scalar(_) => literal.kind,
+        _ => ExprKind::Splat(Box::new(literal)),
+    };
+}
+
+/// The value of a float scalar or vector const-expression whose components are
+/// all equal, as the shader computes it from the printed literals.
+fn const_float(e: &Expr, values: &[Option<f32>]) -> Option<f32> {
+    if !matches!(
+        e.ty,
+        Type::Scalar(Scalar::Float) | Type::Vector(Scalar::Float, _)
+    ) {
+        return None;
+    }
+    let arg = |x: &Expr| const_float(x, values);
+    Some(match &e.kind {
+        ExprKind::Literal(ir::Literal::Float(f)) if f.is_nan() => 0.0,
+        ExprKind::Literal(ir::Literal::Float(f)) => f.clamp(f32::MIN, f32::MAX),
+        ExprKind::Splat(x) => arg(x)?,
+        ExprKind::Var(Root::Global(g)) => values.get(*g).copied().flatten()?,
+        ExprKind::Unary(ir::UnaryOp::Neg, x) => -arg(x)?,
+        ExprKind::Binary(op, a, b) => {
+            let (a, b) = (arg(a)?, arg(b)?);
+            match op {
+                ir::BinaryOp::Add => a + b,
+                ir::BinaryOp::Sub => a - b,
+                ir::BinaryOp::Mul => a * b,
+                ir::BinaryOp::Div => a / b,
+                ir::BinaryOp::Rem => a % b,
+                _ => return None,
+            }
+        }
+        ExprKind::Builtin(name, args) => {
+            let args = args.iter().map(arg).collect::<Option<Vec<f32>>>()?;
+            math(name, &args)?
+        }
+        _ => return None,
+    })
+}
+
+/// A WGSL float built-in; NaN stands for an argument out of its domain.
+fn math(name: &str, args: &[f32]) -> Option<f32> {
+    Some(match (name, args) {
+        ("abs", [x]) => x.abs(),
+        ("exp", [x]) => x.exp(),
+        ("exp2", [x]) => x.exp2(),
+        ("log", [x]) => x.ln(),
+        ("log2", [x]) => x.log2(),
+        ("sqrt", [x]) => x.sqrt(),
+        ("inverseSqrt", [x]) => x.sqrt().recip(),
+        ("pow", [x, y]) if *x < 0.0 || (*x == 0.0 && *y == 0.0) => f32::NAN,
+        ("pow", [x, y]) => x.powf(*y),
+        ("sin", [x]) => x.sin(),
+        ("cos", [x]) => x.cos(),
+        ("tan", [x]) => x.tan(),
+        ("asin", [x]) => x.asin(),
+        ("acos", [x]) => x.acos(),
+        ("atan", [x]) => x.atan(),
+        ("atan2", [y, x]) => y.atan2(*x),
+        ("sinh", [x]) => x.sinh(),
+        ("cosh", [x]) => x.cosh(),
+        ("tanh", [x]) => x.tanh(),
+        ("floor", [x]) => x.floor(),
+        ("ceil", [x]) => x.ceil(),
+        ("trunc", [x]) => x.trunc(),
+        ("fract", [x]) => x - x.floor(),
+        ("min", [a, b]) => a.min(*b),
+        ("max", [a, b]) => a.max(*b),
+        ("saturate", [x]) => x.clamp(0.0, 1.0),
+        ("degrees", [x]) => x.to_degrees(),
+        ("radians", [x]) => x.to_radians(),
+        _ => return None,
+    })
 }
 
 /// Removes the globals and functions that the entry point does not reach, and
