@@ -1301,12 +1301,38 @@ impl Analyzer<'_> {
         }
         let outs = intrinsic_out_args(name, args.len()).unwrap_or(&[]);
         let mut lowered = Vec::new();
+        let mut write_back = Vec::new();
         for (i, a) in args.iter().enumerate() {
             let (value, place) = if outs.contains(&i) {
+                if !self.in_function() {
+                    return Err(self.error(a.span, "this is not allowed in the value of a global"));
+                }
                 let t = self.place(a)?;
-                let value = self.read(&t);
-                let place = t.swizzle.is_none().then(|| t.place.clone());
-                (value, place)
+                if t.swizzle.is_some() {
+                    // The intrinsic writes a whole place; a swizzle takes the value after.
+                    let ty = t.value_type();
+                    let tmp = self.new_local("", ty.clone());
+                    self.state().locals[tmp].written = true;
+                    self.emit_stmt(
+                        Stmt::Local {
+                            id: tmp,
+                            init: None,
+                        },
+                        a.span,
+                    );
+                    write_back.push((t, tmp, a.span));
+                    let place = Place {
+                        root: Root::Local(tmp),
+                        path: Vec::new(),
+                    };
+                    let value = Expr {
+                        kind: ExprKind::Var(place.root),
+                        ty,
+                    };
+                    (value, Some(place))
+                } else {
+                    (self.read(&t), Some(t.place))
+                }
             } else {
                 (self.expr(a)?, None)
             };
@@ -1317,7 +1343,16 @@ impl Analyzer<'_> {
             });
         }
         match intrinsics::lower(self, name, lowered, span) {
-            Lowered::Done(e) => Ok(e),
+            Lowered::Done(e) => {
+                for (target, tmp, arg_span) in write_back {
+                    let value = Expr {
+                        kind: ExprKind::Var(Root::Local(tmp)),
+                        ty: target.value_type(),
+                    };
+                    self.store(&target, value, arg_span);
+                }
+                Ok(e)
+            }
             Lowered::Failed => Err(Reported),
             Lowered::NotIntrinsic => Err(self.error(
                 callee.span,

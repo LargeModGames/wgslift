@@ -467,3 +467,28 @@ fn a_write_in_the_value_of_a_global_is_an_error_with_a_message() {
         );
     }
 }
+
+#[test]
+fn a_swizzle_is_an_out_argument_of_sincos_and_modf() {
+    let m = ok(
+        "float4 main() : COLOR { float2 ag = 0; sincos(1.0, ag.y, ag.x); \
+         float3 v = 0; float f = modf(2.5, v.z); return float4(ag, v.z + f, 1); }",
+    );
+    let components: Vec<_> = entry_body(&m)
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::Assign(p, _) if !p.path.is_empty() => Some((p.root, p.path.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        components,
+        [
+            (Root::Local(0), vec![Access::Component(1)]),
+            (Root::Local(0), vec![Access::Component(0)]),
+            (Root::Local(3), vec![Access::Component(2)]),
+        ],
+        "{:?}",
+        entry_body(&m)
+    );
+}
