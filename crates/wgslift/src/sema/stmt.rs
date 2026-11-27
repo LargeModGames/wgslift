@@ -246,37 +246,92 @@ impl Analyzer<'_> {
             v.modifiers.contains(&Modifier::Static) && !v.modifiers.contains(&Modifier::Const);
         for d in &v.declarators {
             let ty = self.array_type(base.clone(), &d.array, d.span)?;
-            let init = match &d.init {
-                Some(init) => Some(self.initializer(init, &ty, d.span)?),
-                None => None,
-            };
             if is_static {
-                if init
-                    .as_ref()
-                    .is_some_and(|v| !is_const_expr(v, &self.module.globals))
-                {
-                    return Err(
-                        self.error(d.span, "the value of a `static` local must be a constant")
-                    );
-                }
+                let value = match &d.init {
+                    Some(init) => Some(self.static_value(init, &ty, d.span)?),
+                    None => None,
+                };
+                let (init, entry_init) = match value {
+                    Some(v) if !is_const_expr(&v, &self.module.globals) => (None, Some(v)),
+                    value => (value, None),
+                };
                 let g = self.module.globals.len();
                 self.module.globals.push(ir::Global {
                     name: d.name.name.clone(),
                     ty,
                     space: Space::Private,
                     init,
-                    entry_init: None,
+                    entry_init,
                     span: d.span,
                 });
                 let scope = self.state().scopes.last_mut().expect("one scope at least");
                 scope.insert(d.name.name.clone(), Root::Global(g));
                 continue;
             }
+            let init = match &d.init {
+                Some(init) => Some(self.initializer(init, &ty, d.span)?),
+                None => None,
+            };
             let id = self.new_local(&d.name.name, ty);
             out.extend(self.take_pre());
             out.push(Stmt::Local { id, init });
         }
         Ok(())
+    }
+
+    /// The value of a `static` local. fxc sets it once, when the shader starts, so
+    /// it is the value of a global: it sees globals and other `static` locals only.
+    fn static_value(&mut self, init: &ast::Initializer, ty: &Type, span: Span) -> R<Expr> {
+        if let Some((name, at)) = self.local_in(init) {
+            return Err(self.error(
+                at,
+                format!("the value of a `static` local cannot use the local `{name}`"),
+            ));
+        }
+        let state = self.func.take().expect("inside a function");
+        let mut shadowed = Vec::new();
+        for scope in &state.scopes {
+            for (name, root) in scope {
+                if let Root::Global(g) = root {
+                    shadowed.push((name.clone(), self.globals.insert(name.clone(), *g)));
+                }
+            }
+        }
+        let value = self.initializer(init, ty, span);
+        for (name, previous) in shadowed.into_iter().rev() {
+            match previous {
+                Some(g) => self.globals.insert(name, g),
+                None => self.globals.remove(&name),
+            };
+        }
+        self.func = Some(state);
+        value
+    }
+
+    /// The first name in `init` that is a local of the current function.
+    fn local_in(&self, init: &ast::Initializer) -> Option<(String, Span)> {
+        match init {
+            ast::Initializer::Expr(e) => self.local_in_expr(e),
+            ast::Initializer::List(items, _) => items.iter().find_map(|i| self.local_in(i)),
+            ast::Initializer::SamplerState(..) => None,
+        }
+    }
+
+    fn local_in_expr(&self, e: &ast::Expr) -> Option<(String, Span)> {
+        use ast::ExprKind as E;
+        let find = |list: &[&ast::Expr]| list.iter().find_map(|x| self.local_in_expr(x));
+        match &e.kind {
+            E::Ident(name) => matches!(self.lookup_scoped(name), Some(Root::Local(_)))
+                .then(|| (name.clone(), e.span)),
+            E::Literal(_) => None,
+            E::Unary(_, x) | E::Cast(_, x) | E::Member(x, _) => self.local_in_expr(x),
+            E::Binary(_, a, b) | E::Assign(_, a, b) | E::Index(a, b) => find(&[a, b]),
+            E::Ternary(c, a, b) => find(&[c, a, b]),
+            E::Comma(list) | E::Construct(_, list) => {
+                list.iter().find_map(|x| self.local_in_expr(x))
+            }
+            E::Call(_, args) => args.iter().find_map(|x| self.local_in_expr(x)),
+        }
     }
 
     /// The value of an initializer of type `ty`. A `{}` list is flattened into

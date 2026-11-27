@@ -537,3 +537,35 @@ fn an_overloaded_call_reads_an_inout_argument_before_later_arguments_write_it() 
         .unwrap();
     assert!(copy < store, "{body:?}");
 }
+
+#[test]
+fn a_static_local_is_set_once_from_globals_when_the_shader_starts() {
+    let m = ok("float4 u;\nstatic float g = 5;\n\
+         float helper(float x) { static float s = u.x * 3 + g; s += x; return s; }\n\
+         float4 main(float2 uv : TEXCOORD0) : COLOR { g = uv.x; return float4(helper(uv.x), helper(uv.y), 0, 1); }");
+    let s = m.globals.iter().find(|g| g.name == "s").expect("a global");
+    assert_eq!(s.space, Space::Private);
+    let g = m.globals.iter().position(|g| g.name == "g").unwrap();
+    assert!(
+        s.init.is_none()
+            && s.entry_init
+                .as_ref()
+                .is_some_and(|e| reads(e, Root::Global(g))),
+        "{s:?}"
+    );
+    let helper = m.functions.iter().find(|f| f.name == "helper").unwrap();
+    assert_eq!(helper.locals.len(), 1, "{:?}", helper.locals);
+}
+
+#[test]
+fn a_static_local_cannot_use_a_local_or_leave_a_write_behind() {
+    let cases = [
+        "float4 main(float2 uv : TEXCOORD0) : COLOR { static float s = uv.x; return s; }",
+        "float4 main() : COLOR { float k = 1; static float s = k * 2; return s; }",
+        "float4 main() : COLOR { float x; static float s = (x = 1, 2); return s; }",
+        "static float g;\nfloat4 main() : COLOR { static float s = (g = 1, 2); return s; }",
+    ];
+    for src in cases {
+        assert!(!errors(src).is_empty(), "{src}");
+    }
+}
