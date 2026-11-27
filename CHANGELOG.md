@@ -6,6 +6,8 @@ on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project us
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-27
+
 ### Added
 
 - `wgslift-syntax`: an HLSL front end with source spans on every node.
@@ -46,3 +48,6 @@ on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project us
     and deep expressions, which are split into `let` and `const` temporaries.
 - The `milkdrop_translate` example translates every shader in a folder of MilkDrop
   presets and checks the WGSL with naga and, with `--tint`, with Tint.
+
+[Unreleased]: https://github.com/LargeModGames/wgslift/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/LargeModGames/wgslift/releases/tag/v0.1.0
