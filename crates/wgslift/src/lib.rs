@@ -3,17 +3,18 @@
 //! The front end is the `wgslift-syntax` crate. This crate checks the types, lowers
 //! the program to a typed IR and prints WGSL.
 
-pub mod ir;
+mod ir;
 pub mod reflection;
 mod sema;
 #[cfg(test)]
 mod tests;
-pub mod types;
+mod types;
 mod wgsl;
 
 use std::fmt;
 
 pub use reflection::Reflection;
+pub use types::SamplerDim;
 pub use wgslift_syntax as syntax;
 use wgslift_syntax::{Diagnostic, IncludeResolver, Severity, SourceFiles};
 
