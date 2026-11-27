@@ -1215,3 +1215,26 @@ fn a_semantic_index_near_the_u32_limit_does_not_overflow() {
     assert_eq!(semantics, ["TEXCOORD4294967295", "TEXCOORD4294967296"]);
     assert_eq!(locations(&reflection.inputs), [4294967295, 0]);
 }
+#[test]
+fn a_huge_array_input_gets_distinct_locations_quickly() {
+    let output = crate::translate(
+        "test.hlsl",
+        "float4 main(float a[65536] : FOO) : COLOR { return a[0]; }",
+        crate::Options::default(),
+    )
+    .unwrap_or_else(|f| panic!("{f}"));
+    let found = locations(&output.reflection.inputs);
+    assert_eq!(found, (0..65536).collect::<Vec<u32>>());
+}
+
+#[test]
+fn color_and_texcoord_inputs_never_share_a_location() {
+    let (_, reflection) = translate_valid(
+        "float4 main(float4 c : COLOR0, float2 t : TEXCOORD8) : COLOR0 { return c + t.xyxy; }",
+    );
+    assert_eq!(locations(&reflection.inputs), [8, 0]);
+    let (_, reflection) = translate_valid(
+        "float4 main(float4x4 m : TEXCOORD6, float4 c : COLOR0) : COLOR0 { return m[3] + c; }",
+    );
+    assert_eq!(locations(&reflection.inputs), [6, 7, 8, 9, 0]);
+}

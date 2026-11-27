@@ -1,5 +1,6 @@
 //! The generated `@fragment` function around the entry point.
 
+use std::collections::HashSet;
 use std::fmt::Write;
 
 use crate::ir::ParamDir;
@@ -65,16 +66,26 @@ impl Interface {
         field
     }
 
-    /// Gives each member without a location the lowest free one.
+    /// Keeps the first member at each location and gives every other member
+    /// the lowest free one.
     fn assign_locations(&mut self) {
-        for i in 0..self.slots.len() {
-            if self.slots[i].location.is_some() || self.slots[i].builtin.is_some() {
+        let mut used = HashSet::new();
+        for slot in &mut self.slots {
+            if let Some(l) = slot.location
+                && !used.insert(l)
+            {
+                slot.location = None;
+            }
+        }
+        let mut free = 0;
+        for slot in &mut self.slots {
+            if slot.location.is_some() || slot.builtin.is_some() {
                 continue;
             }
-            let free = (0..)
-                .find(|l| !self.slots.iter().any(|s| s.location == Some(*l)))
-                .unwrap_or(0);
-            self.slots[i].location = Some(free);
+            while !used.insert(free) {
+                free += 1;
+            }
+            slot.location = Some(free);
         }
     }
 
