@@ -179,7 +179,7 @@ impl Wrapper<'_, '_, '_> {
             _ => {
                 let location = match upper.as_str() {
                     "TEXCOORD" => Some(index),
-                    "COLOR" => Some(8 + index),
+                    "COLOR" => index.checked_add(8),
                     _ => None,
                 };
                 let slots = match ty {
@@ -200,8 +200,8 @@ impl Wrapper<'_, '_, '_> {
                     .map(|i| {
                         self.located(
                             &format!("{name}_{i}"),
-                            format!("{base}{}", index + i),
-                            location.map(|l| l + i),
+                            format!("{base}{}", u64::from(index) + u64::from(i)),
+                            location.and_then(|l| l.checked_add(i)),
                             &slots.1,
                         )
                     })

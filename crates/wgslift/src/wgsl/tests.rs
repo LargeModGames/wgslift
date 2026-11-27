@@ -1195,3 +1195,23 @@ fn many_same_named_locals_are_named_quickly() {
         }
     }
 }
+fn locations(bindings: &[IoBinding]) -> Vec<u32> {
+    bindings.iter().filter_map(|b| b.location).collect()
+}
+
+#[test]
+fn a_semantic_index_near_the_u32_limit_does_not_overflow() {
+    let (_, reflection) =
+        translate_valid("float4 main(float4 c : COLOR4294967295) : COLOR { return c; }");
+    assert_eq!(locations(&reflection.inputs).len(), 1);
+    let (_, reflection) = translate_valid(
+        "float4 main(float2 t[2] : TEXCOORD4294967295) : COLOR { return t[1].xyxy; }",
+    );
+    let semantics: Vec<&str> = reflection
+        .inputs
+        .iter()
+        .map(|b| b.semantic.as_str())
+        .collect();
+    assert_eq!(semantics, ["TEXCOORD4294967295", "TEXCOORD4294967296"]);
+    assert_eq!(locations(&reflection.inputs), [4294967295, 0]);
+}
