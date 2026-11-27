@@ -323,6 +323,10 @@ impl Analyzer<'_> {
                 let Ok(ty) = self.array_type(base.clone(), &d.array, d.span) else {
                     continue;
                 };
+                if matches!(element(&ty), Type::Sampler(_)) {
+                    self.error(d.span, "samplers in structs are not supported");
+                    continue;
+                }
                 fields.push(ir::Field {
                     name: d.name.name.clone(),
                     ty,
@@ -723,6 +727,14 @@ impl Analyzer<'_> {
     pub fn lookup_scoped(&self, name: &str) -> Option<Root> {
         let state = self.func.as_ref()?;
         state.scopes.iter().rev().find_map(|s| s.get(name).copied())
+    }
+}
+
+/// The element type of an array, through every dimension.
+fn element(ty: &Type) -> &Type {
+    match ty {
+        Type::Array(e, _) => element(e),
+        t => t,
     }
 }
 

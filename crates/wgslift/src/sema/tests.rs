@@ -569,3 +569,17 @@ fn a_static_local_cannot_use_a_local_or_leave_a_write_behind() {
         assert!(!errors(src).is_empty(), "{src}");
     }
 }
+
+#[test]
+fn a_sampler_in_a_struct_is_an_error() {
+    for field in ["sampler2D tex;", "sampler s[2];"] {
+        let src = format!(
+            "struct Material {{ {field} float4 tint; }};\nfloat4 main() : COLOR0 {{ return 1; }}"
+        );
+        let e = errors(&src);
+        assert!(
+            e.iter().any(|m| m.contains("samplers in structs")),
+            "{src}: {e:?}"
+        );
+    }
+}
