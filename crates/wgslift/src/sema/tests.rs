@@ -521,6 +521,17 @@ fn nested_overloaded_calls_lower_each_argument_once() {
 }
 
 #[test]
+fn an_overloaded_call_takes_a_value_where_another_overload_writes() {
+    for arg in ["tex2D(s, uv).r", "float3(1, 2, 3).x", "uv.xx.y"] {
+        ok(&format!(
+            "float g(float a, out float b) {{ b = a; return a; }}\n\
+             float g(float2 a, float b) {{ return a.x + b; }}\nsampler2D s;\n\
+             float4 main(float2 uv : TEXCOORD0) : COLOR {{ return g(uv, {arg}); }}"
+        ));
+    }
+}
+
+#[test]
 fn an_overloaded_call_reads_an_inout_argument_before_later_arguments_write_it() {
     let m = ok(
         "void g(inout float a, float b) {}\nvoid g(inout float2 a, float b) {}\n\

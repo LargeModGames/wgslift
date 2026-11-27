@@ -1399,10 +1399,30 @@ impl Analyzer<'_> {
         }
     }
 
-    /// A call argument: a place when a parameter can write it, otherwise a value.
+    /// A call argument: a place when the parameter writes it, otherwise a value.
     fn call_arg(&mut self, a: &ast::Expr, writes: bool) -> R<CallArg> {
-        if writes && matches!(a.kind, K::Ident(_) | K::Member(..) | K::Index(..)) {
+        if writes {
             return Ok(CallArg::Place(self.place(a)?));
+        }
+        Ok(CallArg::Value(self.expr(a)?))
+    }
+
+    /// An argument that some overloads write: a place when it can be written,
+    /// otherwise a value.
+    fn overload_arg(&mut self, a: &ast::Expr, writes: bool) -> R<CallArg> {
+        if writes && matches!(a.kind, K::Ident(_) | K::Member(..) | K::Index(..)) {
+            let marks = self.func.as_ref().map(|s| (s.pre.len(), s.locals.len()));
+            let (messages, errors) = (self.diagnostics.len(), self.errors);
+            if let Ok(target) = self.place(a) {
+                return Ok(CallArg::Place(target));
+            }
+            if let Some((pre, locals)) = marks {
+                let state = self.state();
+                state.pre.truncate(pre);
+                state.locals.truncate(locals);
+            }
+            self.diagnostics.truncate(messages);
+            self.errors = errors;
         }
         Ok(CallArg::Value(self.expr(a)?))
     }
@@ -1459,7 +1479,7 @@ impl Analyzer<'_> {
                             .get(i)
                             .is_some_and(|p| p.dir != ParamDir::In)
                     });
-                    let arg = self.call_arg(a, writes)?;
+                    let arg = self.overload_arg(a, writes)?;
                     lowered.push(Some((arg, self.pending_len())));
                 }
                 let types: Vec<Type> = lowered.iter().flatten().map(|(a, _)| a.ty()).collect();
