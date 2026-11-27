@@ -20,6 +20,7 @@ use wgslift_syntax::{Diagnostic, IncludeResolver, Severity, SourceFiles};
 
 /// The shader stage of the entry point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Stage {
     /// A pixel shader: a WGSL `@fragment` function.
     Fragment,
@@ -28,6 +29,7 @@ pub enum Stage {
 /// What to do about WGSL's rule that derivatives and implicit-level sampling run
 /// in uniform control flow. Old pixel shaders break the rule often.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Uniformity {
     /// Print `diagnostic(off, derivative_uniformity);` at the top of the module.
     DirectiveOff,
@@ -37,6 +39,7 @@ pub enum Uniformity {
 
 /// Switches for the behaviour of older compilers.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Dialect {
     /// `pow`, `log`, `log2`, `log10`, `sqrt` and `rsqrt` use the absolute value of
     /// their input, as the Direct3D 9 instructions do.
@@ -108,6 +111,7 @@ impl Default for Options<'_> {
 
 /// A successful translation.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Output {
     /// The WGSL module.
     pub wgsl: String,
@@ -121,6 +125,7 @@ pub struct Output {
 
 /// A failed translation: at least one diagnostic is an error.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Failed {
     /// Errors and warnings.
     pub diagnostics: Vec<Diagnostic>,
