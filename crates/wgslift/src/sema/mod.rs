@@ -274,20 +274,24 @@ impl Analyzer<'_> {
                 };
                 parsed.ok_or_else(|| self.error(e.span, "a bad integer"))?
             }
-            ast::ExprKind::Unary(ast::UnaryOp::Neg, x) => -self.const_int(x)?,
+            ast::ExprKind::Unary(ast::UnaryOp::Neg, x) => match self.const_int(x)?.checked_neg() {
+                Some(n) => n,
+                None => return Err(self.error(e.span, "expected a constant integer")),
+            },
             ast::ExprKind::Unary(ast::UnaryOp::Plus, x) => self.const_int(x)?,
             ast::ExprKind::Binary(op, a, b) => {
                 let (a, b) = (self.const_int(a)?, self.const_int(b)?);
-                match op {
-                    ast::BinaryOp::Add => a.wrapping_add(b),
-                    ast::BinaryOp::Sub => a.wrapping_sub(b),
-                    ast::BinaryOp::Mul => a.wrapping_mul(b),
-                    ast::BinaryOp::Div if b != 0 => a / b,
-                    ast::BinaryOp::Rem if b != 0 => a % b,
-                    ast::BinaryOp::Shl => a.wrapping_shl(b as u32),
-                    ast::BinaryOp::Shr => a.wrapping_shr(b as u32),
-                    _ => return Err(self.error(e.span, "expected a constant integer")),
-                }
+                let value = match op {
+                    ast::BinaryOp::Add => Some(a.wrapping_add(b)),
+                    ast::BinaryOp::Sub => Some(a.wrapping_sub(b)),
+                    ast::BinaryOp::Mul => Some(a.wrapping_mul(b)),
+                    ast::BinaryOp::Div => a.checked_div(b),
+                    ast::BinaryOp::Rem => a.checked_rem(b),
+                    ast::BinaryOp::Shl => Some(a.wrapping_shl(b as u32)),
+                    ast::BinaryOp::Shr => Some(a.wrapping_shr(b as u32)),
+                    _ => None,
+                };
+                value.ok_or_else(|| self.error(e.span, "expected a constant integer"))?
             }
             ast::ExprKind::Ident(name) => {
                 let value = self

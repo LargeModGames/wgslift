@@ -440,3 +440,15 @@ fn modf_and_sincos_read_the_input_before_they_store_into_it() {
         .unwrap();
     assert!(!reads(cos, Root::Local(4)), "{body:?}");
 }
+
+#[test]
+fn a_constant_integer_that_overflows_is_an_error() {
+    for size in ["(1 << 63) / -1", "(1 << 63) % -1", "-(1 << 63)"] {
+        let src = format!("float a[{size}];\nfloat4 main() : COLOR {{ return a[0]; }}");
+        let e = errors(&src);
+        assert!(
+            e.iter().any(|m| m.contains("constant integer")),
+            "{src}: {e:?}"
+        );
+    }
+}
