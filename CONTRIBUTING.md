@@ -34,6 +34,9 @@ Tell us the wgslift version and paste the error. Add the shader when you may sha
 |---|---|
 | `crates/wgslift-syntax/` | The front end: preprocessor, lexer, parser and syntax tree |
 | `crates/wgslift-syntax/examples/milkdrop_corpus.rs` | Parses every shader in a folder of MilkDrop presets that you have on your computer |
+| `crates/wgslift/src/sema/` | Type checking, the HLSL intrinsics, and the lowering to the typed IR (`ir.rs`) |
+| `crates/wgslift/src/wgsl/` | The WGSL writer and the reflection of bindings and the entry point |
+| `crates/wgslift/examples/milkdrop_translate.rs` | Translates every shader in a folder of MilkDrop presets and checks the WGSL with naga and, with `--tint`, with Tint |
 | `.github/workflows/` | CI |
 
 ## Before you open a PR
