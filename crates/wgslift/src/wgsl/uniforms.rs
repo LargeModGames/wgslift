@@ -41,6 +41,8 @@ struct StructRepr {
     mirror: Option<String>,
     /// The fields.
     fields: Vec<Repr>,
+    /// The offset and size of each field.
+    places: Vec<(u32, u32)>,
     /// Size and alignment.
     layout: (u32, u32),
 }
@@ -105,12 +107,13 @@ impl Uniforms {
         let mut reflected = Vec::new();
         for ((g, name), m) in members.iter().zip(&laid.0) {
             plan.member_line(&mut text, name, m, names);
-            reflected.push(UniformMember {
-                name: module.globals[*g].name.clone(),
-                offset: m.offset,
-                size: m.size,
-                wgsl_type: plan.stored(&m.repr, names),
-            });
+            reflected.push(plan.reflect(
+                module,
+                &module.globals[*g].name,
+                (m.offset, m.size),
+                &m.repr,
+                names,
+            ));
             plan.globals.insert(*g, m.repr.clone());
         }
         text.push_str("}\n\n");
@@ -192,12 +195,14 @@ impl Uniforms {
                         self.decls.push_str(&text);
                         name
                     });
+                    let places = members.iter().map(|m| (m.offset, m.size)).collect();
                     let fields = members.into_iter().map(|m| m.repr).collect();
                     self.structs.insert(
                         *index,
                         StructRepr {
                             mirror,
                             fields,
+                            places,
                             layout,
                         },
                     );
@@ -243,15 +248,57 @@ impl Uniforms {
                 .uniform_layout(&|_| None)
                 .unwrap_or((4, 4)),
             Repr::Array { elem, len, wrap } => {
-                let (size, align) = self.layout(elem);
-                let stride = if wrap.is_some() {
-                    round_up(size, 16)
-                } else {
-                    round_up(size, align)
-                };
-                (stride * len, align)
+                let (_, align) = self.layout(elem);
+                (self.stride(elem, wrap.is_some()) * len, align)
             }
             Repr::Struct(index) => self.structs[index].layout,
+        }
+    }
+
+    /// The bytes from one array element to the next.
+    fn stride(&self, elem: &Repr, wrapped: bool) -> u32 {
+        let (size, align) = self.layout(elem);
+        if wrapped {
+            round_up(size, 16)
+        } else {
+            round_up(size, align)
+        }
+    }
+
+    /// The reflection of a stored value at `place` (offset and size).
+    fn reflect(
+        &self,
+        module: &Module,
+        name: &str,
+        place: (u32, u32),
+        repr: &Repr,
+        names: &NameTable<'_>,
+    ) -> UniformMember {
+        let (stride, members) = match repr {
+            Repr::Array { elem, wrap, .. } => {
+                let size = self.layout(elem).0;
+                let element = self.reflect(module, "", (0, size), elem, names);
+                (Some(self.stride(elem, wrap.is_some())), vec![element])
+            }
+            Repr::Struct(index) => {
+                let stored = &self.structs[index];
+                let fields = module.structs[*index].fields.iter();
+                let members = fields
+                    .zip(&stored.fields)
+                    .zip(&stored.places)
+                    .map(|((f, r), place)| self.reflect(module, &f.name, *place, r, names))
+                    .collect();
+                (None, members)
+            }
+            Repr::Value(_) | Repr::Bool(_) => (None, Vec::new()),
+        };
+        UniformMember {
+            name: name.to_string(),
+            offset: place.0,
+            size: place.1,
+            wgsl_type: self.stored(repr, names),
+            stride,
+            members,
         }
     }
 

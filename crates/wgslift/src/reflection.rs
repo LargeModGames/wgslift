@@ -7,6 +7,7 @@ use crate::types::SamplerDim;
 
 /// The bindings and entry-point interface of a translated module.
 #[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
 pub struct Reflection {
     /// The WGSL name of the `@fragment` function. It differs from
     /// `Options::entry_point` when that name is a WGSL keyword or collides with a
@@ -24,6 +25,7 @@ pub struct Reflection {
 
 /// The uniform buffer: one WGSL struct that holds every uniform.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct UniformBuffer {
     /// The binding number in group 0.
     pub binding: u32,
@@ -35,6 +37,7 @@ pub struct UniformBuffer {
 
 /// One uniform in the uniform buffer.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct UniformMember {
     /// The HLSL name.
     pub name: String,
@@ -44,10 +47,16 @@ pub struct UniformMember {
     pub size: u32,
     /// The WGSL type, for example `vec4<f32>`.
     pub wgsl_type: String,
+    /// For an array, the bytes from the start of one element to the next.
+    pub stride: Option<u32>,
+    /// For an array, its element, unnamed at offset 0; for a struct, its fields.
+    /// Offsets are from the start of this value.
+    pub members: Vec<UniformMember>,
 }
 
 /// One HLSL sampler, which becomes a WGSL texture and a WGSL sampler.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct TextureBinding {
     /// The HLSL name of the sampler.
     pub name: String,
@@ -61,6 +70,7 @@ pub struct TextureBinding {
 
 /// One input or output of the entry point.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct IoBinding {
     /// The HLSL name of the parameter or field.
     pub name: String,

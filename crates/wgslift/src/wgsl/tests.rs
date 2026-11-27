@@ -1116,3 +1116,44 @@ fn float_literals_keep_their_value_and_type() {
     );
     assert_eq!(body::literal_text(Literal::Uint(4)).0, "4u");
 }
+
+fn translate_valid(source: &str) -> (String, Reflection) {
+    let output = crate::translate("test.hlsl", source, crate::Options::default())
+        .unwrap_or_else(|f| panic!("{f}"));
+    validate(&output.wgsl);
+    (output.wgsl, output.reflection)
+}
+
+#[test]
+fn the_reflection_gives_array_strides_and_struct_fields() {
+    let (_, reflection) = translate_valid(
+        "struct Light { float3 dir; bool on; float w[2]; };\n\
+         float weights[4]; Light light;\n\
+         float4 main() : COLOR0 { return weights[1] + light.w[0] + (light.on ? 1 : 0); }",
+    );
+    let buffer = reflection.uniform_buffer.unwrap();
+    let weights = &buffer.members[0];
+    assert_eq!(
+        (weights.offset, weights.size, weights.stride),
+        (0, 64, Some(16))
+    );
+    assert_eq!(weights.members.len(), 1);
+    assert_eq!((weights.members[0].offset, weights.members[0].size), (0, 4));
+    assert_eq!(weights.members[0].wgsl_type, "f32");
+    let light = &buffer.members[1];
+    assert_eq!(light.stride, None);
+    let fields: Vec<(&str, u32, u32, &str)> = light
+        .members
+        .iter()
+        .map(|m| (m.name.as_str(), m.offset, m.size, m.wgsl_type.as_str()))
+        .collect();
+    assert_eq!(
+        fields,
+        [
+            ("dir", 0, 12, "vec3<f32>"),
+            ("on", 12, 4, "u32"),
+            ("w", 16, 32, "array<UniformElement, 2>"),
+        ]
+    );
+    assert_eq!(light.members[2].stride, Some(16));
+}
