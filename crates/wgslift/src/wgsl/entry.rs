@@ -407,6 +407,9 @@ pub(super) fn wrapper(p: &Printer<'_>) -> (String, Vec<IoBinding>, Vec<IoBinding
         String::new()
     };
     let _ = writeln!(out, "@fragment\nfn {}({params}){ret} {{", p.names.wrapper);
+    if let Some((name, limit)) = &p.names.loop_budget {
+        let _ = writeln!(out, "    {name} = {limit}u;");
+    }
     for line in &lines {
         let _ = writeln!(out, "    {line}");
     }

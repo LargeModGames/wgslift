@@ -195,6 +195,10 @@ impl<'p, 'm> Body<'p, 'm> {
                 break_if,
             } => {
                 self.line(indent, "loop {");
+                if let Some((name, _)) = &self.p.names.loop_budget {
+                    self.line(indent + 1, &format!("if {name} == 0u {{ break; }}"));
+                    self.line(indent + 1, &format!("{name} -= 1u;"));
+                }
                 self.block(body, indent + 1);
                 if !continuing.is_empty() || break_if.is_some() {
                     self.line(indent + 1, "continuing {");

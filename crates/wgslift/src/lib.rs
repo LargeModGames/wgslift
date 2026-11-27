@@ -6,6 +6,8 @@
 pub mod ir;
 pub mod reflection;
 mod sema;
+#[cfg(test)]
+mod tests;
 pub mod types;
 mod wgsl;
 
@@ -82,6 +84,10 @@ pub struct Options<'a> {
     pub predeclare: Vec<(String, String)>,
     /// Finds `#include` files. Without one, every `#include` is an error.
     pub includes: Option<&'a mut dyn IncludeResolver>,
+    /// The most loop passes one invocation of the entry point can make, summed over
+    /// all loops. When the budget is spent, every loop exits. Use it for untrusted
+    /// shaders: a loop that never ends can hang the GPU.
+    pub loop_limit: Option<u32>,
 }
 
 impl Default for Options<'_> {
@@ -94,6 +100,7 @@ impl Default for Options<'_> {
             prelude: None,
             predeclare: Vec::new(),
             includes: None,
+            loop_limit: None,
         }
     }
 }
@@ -142,6 +149,7 @@ pub fn translate(name: &str, text: &str, options: Options<'_>) -> Result<Output,
         prelude,
         predeclare,
         includes,
+        loop_limit,
     } = options;
     let parsed = wgslift_syntax::parse(
         name,
@@ -199,6 +207,7 @@ pub fn translate(name: &str, text: &str, options: Options<'_>) -> Result<Output,
         &wgsl::PrintOptions {
             stage,
             uniformity: dialect.uniformity,
+            loop_limit,
         },
     );
     Ok(Output {

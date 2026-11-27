@@ -24,12 +24,14 @@ pub(crate) struct PrintOptions {
     pub stage: Stage,
     /// The uniformity policy.
     pub uniformity: Uniformity,
+    /// The loop budget of one invocation.
+    pub loop_limit: Option<u32>,
 }
 
 /// Prints `module` as WGSL and reports its bindings and interface.
 pub(crate) fn print(module: &ir::Module, options: &PrintOptions) -> (String, Reflection) {
     let Stage::Fragment = options.stage;
-    Printer::new(module).print(options.uniformity)
+    Printer::new(module, options.loop_limit).print(options.uniformity)
 }
 
 /// The WGSL names of everything at module scope.
@@ -44,6 +46,8 @@ struct Names {
     /// The name of the generated `@fragment` function.
     wrapper: String,
     uniform_var: String,
+    /// The private global that counts down the loop budget, and the budget.
+    loop_budget: Option<(String, u32)>,
     /// Every module-scope name, to seed the namers of function scopes.
     module: Namer,
 }
@@ -56,7 +60,7 @@ struct Printer<'m> {
 }
 
 impl<'m> Printer<'m> {
-    fn new(module: &'m ir::Module) -> Printer<'m> {
+    fn new(module: &'m ir::Module, loop_limit: Option<u32>) -> Printer<'m> {
         let mut namer = Namer::default();
         let structs: Vec<String> = module.structs.iter().map(|s| namer.name(&s.name)).collect();
         let fields: Vec<Vec<String>> = module
@@ -89,6 +93,7 @@ impl<'m> Printer<'m> {
             .collect();
         let uniform_struct = namer.name("Uniforms");
         let uniform_var = namer.name("uniforms");
+        let loop_budget = loop_limit.map(|limit| (namer.name("loop_budget"), limit));
         let members: Vec<(usize, String)> = module
             .globals
             .iter()
@@ -117,6 +122,7 @@ impl<'m> Printer<'m> {
                 functions,
                 wrapper,
                 uniform_var,
+                loop_budget,
                 module: namer,
             },
             uniforms,
@@ -138,6 +144,7 @@ impl<'m> Printer<'m> {
     fn print(mut self, uniformity: Uniformity) -> (String, Reflection) {
         let mut out = String::new();
         let mut reflection = Reflection {
+            entry_point: self.names.wrapper.clone(),
             uniform_buffer: self.uniforms.reflection.take(),
             ..Reflection::default()
         };
@@ -148,6 +155,9 @@ impl<'m> Printer<'m> {
         out.push_str(&self.uniforms.decls);
         self.print_textures(&mut out, &mut reflection);
         self.print_globals(&mut out);
+        if let Some((name, _)) = &self.names.loop_budget {
+            let _ = writeln!(out, "var<private> {name}: u32;\n");
+        }
         for f in 0..self.module.functions.len() {
             out.push_str(&Body::function(&self, f));
             out.push('\n');

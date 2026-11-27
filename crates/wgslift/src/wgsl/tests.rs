@@ -29,6 +29,7 @@ fn print_valid(module: &Module) -> (String, Reflection) {
         &PrintOptions {
             stage: Stage::Fragment,
             uniformity: Uniformity::DirectiveOff,
+            loop_limit: None,
         },
     );
     validate(&text);
@@ -204,6 +205,7 @@ fn keep_uniformity_prints_no_directive() {
         &PrintOptions {
             stage: Stage::Fragment,
             uniformity: Uniformity::Keep,
+            loop_limit: None,
         },
     );
     validate(&text);

@@ -8,6 +8,10 @@ use crate::types::SamplerDim;
 /// The bindings and entry-point interface of a translated module.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Reflection {
+    /// The WGSL name of the `@fragment` function. It differs from
+    /// `Options::entry_point` when that name is a WGSL keyword or collides with a
+    /// generated name.
+    pub entry_point: String,
     /// The uniform buffer, when the shader has uniforms.
     pub uniform_buffer: Option<UniformBuffer>,
     /// The texture and sampler pairs, in binding order.
