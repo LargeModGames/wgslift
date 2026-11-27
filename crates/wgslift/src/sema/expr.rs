@@ -4,14 +4,15 @@
 //! arguments) becomes a statement before the current statement. HLSL evaluates
 //! every operand of `&&`, `||` and `?:`, so this keeps the meaning.
 
-use wgslift_syntax::Span;
 use wgslift_syntax::ast::{self, BinaryOp as AstBinary, ExprKind as K, UnaryOp as AstUnary};
+use wgslift_syntax::{FileId, Span};
 
 use super::lowerer::{IntrinsicArg, Lowered, Lowerer};
-use super::{Analyzer, R, Reported, intrinsic_out_args, intrinsics, zero};
+use super::{Analyzer, R, Reported, intrinsic_out_args, intrinsics, is_const_expr, zero};
 use crate::Dialect;
 use crate::ir::{
-    Access, Arg, BinaryOp, Expr, ExprKind, Literal, ParamDir, Place, Root, Space, Stmt, UnaryOp,
+    Access, Arg, BinaryOp, Expr, ExprKind, Global, Literal, ParamDir, Place, Root, Space, Stmt,
+    UnaryOp,
 };
 use crate::types::{SamplerDim, Scalar, Type};
 
@@ -32,6 +33,21 @@ impl Target {
         match (&self.swizzle, &self.ty) {
             (Some(s), ty) => Type::vector(ty.scalar().unwrap_or(Scalar::Float), s.len() as u8),
             (None, ty) => ty.clone(),
+        }
+    }
+}
+
+/// An argument of a user call, lowered.
+enum CallArg {
+    Value(Expr),
+    Place(Target),
+}
+
+impl CallArg {
+    fn ty(&self) -> Type {
+        match self {
+            CallArg::Value(v) => v.ty.clone(),
+            CallArg::Place(t) => t.value_type(),
         }
     }
 }
@@ -196,11 +212,33 @@ impl Analyzer<'_> {
     }
 
     /// Keeps the current `value` in a new local, so later stores cannot change it.
+    /// In the value of a global it is a new global, set before the current one.
     pub fn snapshot(&mut self, value: Expr) -> Expr {
-        if matches!(value.kind, ExprKind::Literal(_)) || !self.in_function() {
+        if matches!(value.kind, ExprKind::Literal(_)) {
             return value;
         }
         let ty = value.ty.clone();
+        if !self.in_function() {
+            let constant = is_const_expr(&value, &self.module.globals);
+            let (space, init, entry_init) = if constant {
+                (Space::Const, Some(value), None)
+            } else {
+                (Space::Private, None, Some(value))
+            };
+            let g = self.module.globals.len();
+            self.module.globals.push(Global {
+                name: String::new(),
+                ty: ty.clone(),
+                space,
+                init,
+                entry_init,
+                span: Span::new(FileId(0), 0, 0),
+            });
+            return Expr {
+                kind: ExprKind::Var(Root::Global(g)),
+                ty,
+            };
+        }
         let id = self.new_local("", ty.clone());
         self.state().pre.push(Stmt::Local {
             id,
@@ -1361,20 +1399,32 @@ impl Analyzer<'_> {
         }
     }
 
-    /// The types of `args`, with no statements, locals or messages left behind.
-    fn arg_types(&mut self, args: &[ast::Expr]) -> R<Vec<Type>> {
-        let marks = self.func.as_ref().map(|s| (s.pre.len(), s.locals.len()));
-        let messages = self.diagnostics.len();
-        let types: R<Vec<Type>> = args.iter().map(|a| self.expr(a).map(|v| v.ty)).collect();
-        if let Some((pre, locals)) = marks {
-            let state = self.state();
-            state.pre.truncate(pre);
-            state.locals.truncate(locals);
+    /// A call argument: a place when a parameter can write it, otherwise a value.
+    fn call_arg(&mut self, a: &ast::Expr, writes: bool) -> R<CallArg> {
+        if writes && matches!(a.kind, K::Ident(_) | K::Member(..) | K::Index(..)) {
+            return Ok(CallArg::Place(self.place(a)?));
         }
-        if types.is_ok() {
-            self.diagnostics.truncate(messages);
+        Ok(CallArg::Value(self.expr(a)?))
+    }
+
+    fn pending_len(&self) -> usize {
+        self.func.as_ref().map_or(0, |s| s.pre.len())
+    }
+
+    /// Runs `f` with the statements it adds placed at `at` among the pending ones,
+    /// and answers how many it added.
+    fn insert_at<T>(&mut self, at: usize, f: impl FnOnce(&mut Self) -> R<T>) -> R<(T, usize)> {
+        let tail = match self.func.as_mut() {
+            Some(s) => s.pre.split_off(at),
+            None => Vec::new(),
+        };
+        let before = self.pending_len();
+        let result = f(self);
+        let added = self.pending_len() - before;
+        if let Some(s) = self.func.as_mut() {
+            s.pre.extend(tail);
         }
-        types
+        result.map(|t| (t, added))
     }
 
     fn user_call(
@@ -1393,13 +1443,26 @@ impl Analyzer<'_> {
             .copied()
             .filter(|&f| fits(&self.signatures[f]))
             .collect();
+        // With more than one candidate the arguments are lowered once, before the
+        // choice, and what each parameter adds goes in where its argument ended.
+        let mut lowered: Vec<Option<(CallArg, usize)>> = Vec::new();
         let index = match candidates.as_slice() {
             [] => {
                 return Err(self.error(span, format!("no `{name}` takes {} arguments", args.len())));
             }
             [one] => *one,
             many => {
-                let types = self.arg_types(args)?;
+                for (i, a) in args.iter().enumerate() {
+                    let writes = many.iter().any(|&f| {
+                        self.signatures[f]
+                            .params
+                            .get(i)
+                            .is_some_and(|p| p.dir != ParamDir::In)
+                    });
+                    let arg = self.call_arg(a, writes)?;
+                    lowered.push(Some((arg, self.pending_len())));
+                }
+                let types: Vec<Type> = lowered.iter().flatten().map(|(a, _)| a.ty()).collect();
                 let costs: Vec<Option<Vec<u32>>> = many
                     .iter()
                     .map(|&f| {
@@ -1439,38 +1502,50 @@ impl Analyzer<'_> {
         let sig = self.signatures[index].clone();
         let mut call_args = Vec::new();
         let mut write_back = Vec::new();
+        let mut shift = 0;
         for (i, p) in sig.params.iter().enumerate() {
-            match (p.dir, args.get(i)) {
-                (ParamDir::In, Some(a)) => {
-                    let v = self.expr(a)?;
-                    call_args.push(Arg::Value(self.convert(v, &p.ty, a.span, false)));
+            let Some(a) = args.get(i) else {
+                if p.dir != ParamDir::In {
+                    return Err(self.error(span, "an `out` parameter needs an argument"));
                 }
-                (ParamDir::In, None) => {
-                    let default = p.default.clone().expect("checked by fits()");
-                    let v = self.expr(&default)?;
-                    call_args.push(Arg::Value(self.convert(v, &p.ty, span, false)));
-                }
-                (dir, Some(a)) => {
-                    if !self.in_function() {
-                        return Err(
-                            self.error(a.span, "this is not allowed in the value of a global")
-                        );
-                    }
-                    let target = self.place(a)?;
-                    let init = if dir == ParamDir::InOut {
-                        let current = self.read(&target);
-                        Some(self.convert(current, &p.ty, a.span, false))
-                    } else {
-                        None
+                let default = p.default.clone().expect("checked by fits()");
+                let v = self.expr(&default)?;
+                call_args.push(Arg::Value(self.convert(v, &p.ty, span, false)));
+                continue;
+            };
+            let (arg, at) = match lowered.get_mut(i).and_then(Option::take) {
+                Some((arg, mark)) => (arg, mark + shift),
+                None => (self.call_arg(a, p.dir != ParamDir::In)?, self.pending_len()),
+            };
+            let (call_arg, added) = self.insert_at(at, |s| {
+                if p.dir == ParamDir::In {
+                    let v = match arg {
+                        CallArg::Value(v) => v,
+                        CallArg::Place(t) => s.read(&t),
                     };
-                    let tmp = self.new_local("", p.ty.clone());
-                    self.state().locals[tmp].written = true;
-                    self.emit_stmt(Stmt::Local { id: tmp, init }, a.span);
-                    call_args.push(Arg::Ref(tmp));
-                    write_back.push((target, tmp, a.span));
+                    return Ok(Arg::Value(s.convert(v, &p.ty, a.span, false)));
                 }
-                (_, None) => return Err(self.error(span, "an `out` parameter needs an argument")),
-            }
+                if !s.in_function() {
+                    return Err(s.error(a.span, "this is not allowed in the value of a global"));
+                }
+                let target = match arg {
+                    CallArg::Place(t) => t,
+                    CallArg::Value(_) => s.place(a)?,
+                };
+                let init = if p.dir == ParamDir::InOut {
+                    let current = s.read(&target);
+                    Some(s.convert(current, &p.ty, a.span, false))
+                } else {
+                    None
+                };
+                let tmp = s.new_local("", p.ty.clone());
+                s.state().locals[tmp].written = true;
+                s.emit_stmt(Stmt::Local { id: tmp, init }, a.span);
+                write_back.push((target, tmp, a.span));
+                Ok(Arg::Ref(tmp))
+            })?;
+            shift += added;
+            call_args.push(call_arg);
         }
         let call = Expr {
             kind: ExprKind::Call(index, call_args),

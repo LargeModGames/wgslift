@@ -492,3 +492,48 @@ fn a_swizzle_is_an_out_argument_of_sincos_and_modf() {
         entry_body(&m)
     );
 }
+
+#[test]
+fn a_value_used_twice_in_a_global_value_is_kept_once() {
+    let depth = 8;
+    let value = (0..depth).fold("y".to_string(), |acc, _| format!("pow({acc}, 4)"));
+    let m = ok(&format!(
+        "float y;\nstatic float g = {value};\nfloat4 main() : COLOR {{ return g; }}"
+    ));
+    let mut nodes = 0;
+    for g in &m.globals {
+        for value in g.init.iter().chain(&g.entry_init) {
+            super::visit_expr(value, &mut |_| nodes += 1);
+        }
+    }
+    assert!(nodes < 100, "{nodes} nodes");
+}
+
+#[test]
+fn nested_overloaded_calls_lower_each_argument_once() {
+    let depth = 40;
+    let call = (0..depth).fold("1.0".to_string(), |acc, _| format!("f({acc})"));
+    let m = ok(&format!(
+        "float f(float x) {{ return x; }}\nfloat f(int x) {{ return x; }}\n\
+         float4 main() : COLOR {{ return {call}; }}"
+    ));
+    assert_eq!(m.functions.len(), 2);
+}
+
+#[test]
+fn an_overloaded_call_reads_an_inout_argument_before_later_arguments_write_it() {
+    let m = ok(
+        "void g(inout float a, float b) {}\nvoid g(inout float2 a, float b) {}\n\
+         float4 main() : COLOR { float x = 1; g(x, x = 5); return x; }",
+    );
+    let body = entry_body(&m);
+    let copy = body
+        .iter()
+        .position(|s| matches!(s, Stmt::Local { init: Some(e), .. } if matches!(e.kind, ExprKind::Var(Root::Local(0)))))
+        .expect("a copy of x");
+    let store = body
+        .iter()
+        .position(|s| matches!(s, Stmt::Assign(p, _) if p.root == Root::Local(0)))
+        .unwrap();
+    assert!(copy < store, "{body:?}");
+}
