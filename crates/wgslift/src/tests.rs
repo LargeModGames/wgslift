@@ -72,3 +72,13 @@ fn legacy_products_print_valid_wgsl() {
     let output = translate_ok(source, Options::default());
     assert!(output.wgsl.contains("select("), "{}", output.wgsl);
 }
+
+#[test]
+fn a_constant_legacy_product_that_overflows_still_folds() {
+    let source = "static const float c = 1e20, d = 1e20;
+    static const float e = c * d;
+    float4 main(float2 uv : TEXCOORD0) : COLOR0 {
+        return float4(c * d * 2, e * 2, uv);
+    }";
+    translate_ok(source, Options::default());
+}

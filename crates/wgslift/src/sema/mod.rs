@@ -939,6 +939,43 @@ fn const_float(e: &Expr, values: &[Option<f32>]) -> Option<f32> {
             let args = args.iter().map(arg).collect::<Option<Vec<f32>>>()?;
             math(name, &args)?
         }
+        ExprKind::Select {
+            cond,
+            accept,
+            reject,
+        } => {
+            if const_bool(cond, values)? {
+                arg(accept)?
+            } else {
+                arg(reject)?
+            }
+        }
+        _ => return None,
+    })
+}
+
+/// A constant condition such as the ones of the legacy products: float comparisons,
+/// joined by `|` and `&`.
+fn const_bool(e: &Expr, values: &[Option<f32>]) -> Option<bool> {
+    let ExprKind::Binary(op, a, b) = &e.kind else {
+        return None;
+    };
+    if let ir::BinaryOp::Or | ir::BinaryOp::And = op {
+        let (a, b) = (const_bool(a, values)?, const_bool(b, values)?);
+        return Some(if *op == ir::BinaryOp::Or {
+            a | b
+        } else {
+            a & b
+        });
+    }
+    let (a, b) = (const_float(a, values)?, const_float(b, values)?);
+    Some(match op {
+        ir::BinaryOp::Eq => a == b,
+        ir::BinaryOp::Ne => a != b,
+        ir::BinaryOp::Lt => a < b,
+        ir::BinaryOp::Le => a <= b,
+        ir::BinaryOp::Gt => a > b,
+        ir::BinaryOp::Ge => a >= b,
         _ => return None,
     })
 }
