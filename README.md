@@ -38,8 +38,8 @@ match wgslift::translate("main.hlsl", source, options) {
 ```
 
 `Dialect::d3d9_legacy()` (the default) follows the Direct3D 9 compiler: for example,
-`pow`, `log` and `sqrt` use the absolute value of their input, and a shader may write
-to a uniform.
+`pow`, `log` and `sqrt` use the absolute value of their input, 0 times infinity is 0,
+and a shader may write to a uniform.
 
 wgslift is not affiliated with Microsoft. HLSL is used here only to name the language
 that wgslift reads.

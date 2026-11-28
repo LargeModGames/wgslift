@@ -6,6 +6,14 @@ on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project us
 
 ## [Unreleased]
 
+### Fixed
+
+- `wgslift`: `Dialect::d3d9_legacy` multiplies as Direct3D 9 hardware does: 0 times
+  anything, infinity and NaN included, is 0 in products, quotients, `dot`, `mul`
+  and `normalize` (the new `Dialect::legacy_multiply`). A shader that divides 0 by
+  0, for example with a MilkDrop `q` variable that is never set, no longer turns
+  black.
+
 ## [0.1.0] - 2026-11-27
 
 ### Added
