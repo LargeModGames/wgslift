@@ -780,6 +780,79 @@ fn share(cx: &mut dyn Lowerer, value: Expr) -> Expr {
     }
 }
 
+/// The value itself when it is a variable, a literal or a constant part of one,
+/// otherwise a temp.
+fn repeat(cx: &mut dyn Lowerer, value: Expr) -> Expr {
+    fn plain(e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Var(_) | ExprKind::Literal(_) => true,
+            ExprKind::Swizzle(x, _) | ExprKind::Splat(x) | ExprKind::Field(x, _) => plain(x),
+            ExprKind::Index(x, i) => plain(x) && matches!(i.kind, ExprKind::Literal(_)),
+            _ => false,
+        }
+    }
+    if plain(&value) { value } else { cx.temp(value) }
+}
+
+/// A finite literal other than 0, or a splat of one: IEEE math multiplies by it as
+/// `legacy_multiply` does.
+pub(crate) fn nonzero_literal(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Literal(Literal::Float(v)) => *v != 0.0 && v.is_finite(),
+        ExprKind::Literal(Literal::Int(v)) => *v != 0,
+        ExprKind::Literal(Literal::Uint(v)) => *v != 0,
+        ExprKind::Splat(x) => nonzero_literal(x),
+        _ => false,
+    }
+}
+
+/// Whether `a * b` needs the `legacy_multiply` rule: both are floats, and neither
+/// is a `nonzero_literal`.
+fn legacy_product(cx: &dyn Lowerer, a: &Expr, b: &Expr) -> bool {
+    cx.dialect().legacy_multiply
+        && matches!(
+            a.ty,
+            Type::Scalar(Scalar::Float) | Type::Vector(Scalar::Float, _)
+        )
+        && !nonzero_literal(a)
+        && !nonzero_literal(b)
+}
+
+/// `a * b` for two values of one type, where 0 times anything is 0 under
+/// `legacy_multiply`.
+pub(crate) fn product(cx: &mut dyn Lowerer, a: Expr, b: Expr) -> Expr {
+    let ty = a.ty.clone();
+    // A square is never 0 times infinity.
+    if a == b || !legacy_product(cx, &a, &b) {
+        return binary(BinaryOp::Mul, a, b, ty);
+    }
+    let (a, b) = (repeat(cx, a), repeat(cx, b));
+    let zero = splat(zero(Scalar::Float), &ty);
+    let bools = ty.with_scalar(Scalar::Bool);
+    let is_zero = |x: &Expr| binary(BinaryOp::Eq, x.clone(), zero.clone(), bools.clone());
+    let either = binary(BinaryOp::Or, is_zero(&a), is_zero(&b), bools.clone());
+    select(either, zero.clone(), binary(BinaryOp::Mul, a, b, ty))
+}
+
+/// `a / b` for two values of one type. Under `legacy_multiply` it is `a * rcp(b)`
+/// with the rule of `product`: 0 where `a` is 0 or `b` is infinite.
+pub(crate) fn quotient(cx: &mut dyn Lowerer, a: Expr, b: Expr) -> Expr {
+    let ty = a.ty.clone();
+    if !legacy_product(cx, &a, &b) {
+        return binary(BinaryOp::Div, a, b, ty);
+    }
+    // `1 / b` is not printed: WGSL rejects a constant one that is infinite.
+    let (a, b) = (repeat(cx, a), repeat(cx, b));
+    let zero = splat(zero(Scalar::Float), &ty);
+    let bools = ty.with_scalar(Scalar::Bool);
+    let a_zero = binary(BinaryOp::Eq, a.clone(), zero.clone(), bools.clone());
+    let magnitude = call("abs", vec![b.clone()], ty.clone());
+    let max = splat(Expr::float(f32::MAX), &ty);
+    let b_infinite = binary(BinaryOp::Gt, magnitude, max, bools.clone());
+    let either = binary(BinaryOp::Or, a_zero, b_infinite, bools);
+    select(either, zero, binary(BinaryOp::Div, a, b, ty))
+}
+
 /// Wraps the first part in `abs()`.
 fn abs_first(parts: &mut [Expr]) {
     let first = parts[0].clone();

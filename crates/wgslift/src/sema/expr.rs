@@ -811,8 +811,13 @@ impl Analyzer<'_> {
         if let Shape::Matrix(rows, cols) = sh {
             // WGSL has no element-wise matrix product, division, remainder or
             // comparison: build the result one row at a time.
+            let scale = [&a, &b]
+                .into_iter()
+                .find(|e| shape(&e.ty) == Some(Shape::Scalar));
             let is_scale = matches!(bop, BinaryOp::Mul)
-                && (shape(&a.ty) == Some(Shape::Scalar) || shape(&b.ty) == Some(Shape::Scalar));
+                && scale.is_some_and(|s| {
+                    !self.dialect.legacy_multiply || intrinsics::nonzero_literal(s)
+                });
             if !compare && (matches!(bop, BinaryOp::Add | BinaryOp::Sub) || is_scale) {
                 // WGSL scales a matrix by a scalar, but adds only matrices.
                 let keep_scalar = |e: &Expr| is_scale && shape(&e.ty) == Some(Shape::Scalar);
@@ -847,10 +852,7 @@ impl Analyzer<'_> {
                         ),
                         ty: row_ty.clone(),
                     };
-                    Expr {
-                        kind: ExprKind::Binary(bop, Box::new(row(&a)), Box::new(row(&b))),
-                        ty: row_ty.clone(),
-                    }
+                    self.arith(bop, row(&a), row(&b))
                 })
                 .collect();
             return Ok(Expr {
@@ -860,15 +862,28 @@ impl Analyzer<'_> {
         }
         let a = self.convert(a, &ty, span, false);
         let b = self.convert(b, &ty, span, false);
-        let result = if compare {
-            with_shape(Scalar::Bool, sh)
-        } else {
-            ty
-        };
-        Ok(Expr {
-            kind: ExprKind::Binary(bop, Box::new(a), Box::new(b)),
-            ty: result,
-        })
+        if compare {
+            return Ok(Expr {
+                kind: ExprKind::Binary(bop, Box::new(a), Box::new(b)),
+                ty: with_shape(Scalar::Bool, sh),
+            });
+        }
+        Ok(self.arith(bop, a, b))
+    }
+
+    /// `a bop b` for two values of one type, with the products of the dialect.
+    fn arith(&mut self, bop: BinaryOp, a: Expr, b: Expr) -> Expr {
+        match bop {
+            BinaryOp::Mul => intrinsics::product(self, a, b),
+            BinaryOp::Div => intrinsics::quotient(self, a, b),
+            _ => {
+                let ty = a.ty.clone();
+                Expr {
+                    kind: ExprKind::Binary(bop, Box::new(a), Box::new(b)),
+                    ty,
+                }
+            }
+        }
     }
 
     fn assign(

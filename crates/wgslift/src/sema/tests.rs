@@ -648,3 +648,217 @@ fn constant_math_out_of_range_still_creates_a_shader() {
         .unwrap_or_else(|e| panic!("{src}\n{}\n{wgsl}", e.emit_to_string(wgsl)));
     }
 }
+
+/// A value while a test evaluates the IR: float or bool components, or the WGSL
+/// columns of a matrix.
+#[derive(Debug, Clone, PartialEq)]
+enum Value {
+    F(Vec<f32>),
+    B(Vec<bool>),
+    M(Vec<Vec<f32>>),
+}
+
+impl Value {
+    fn f(&self) -> &[f32] {
+        match self {
+            Value::F(v) => v,
+            other => panic!("expected floats, found {other:?}"),
+        }
+    }
+
+    fn b(&self) -> &[bool] {
+        match self {
+            Value::B(v) => v,
+            other => panic!("expected bools, found {other:?}"),
+        }
+    }
+}
+
+fn eval(
+    e: &crate::ir::Expr,
+    m: &Module,
+    locals: &[Option<Value>],
+    inputs: &[(&str, f32)],
+) -> Value {
+    use crate::ir::{BinaryOp as Op, Literal, UnaryOp};
+    let ev = |x: &crate::ir::Expr| eval(x, m, locals, inputs);
+    let zip = |a: &[f32], b: &[f32], f: fn(f32, f32) -> f32| {
+        Value::F(a.iter().zip(b).map(|(x, y)| f(*x, *y)).collect())
+    };
+    match &e.kind {
+        ExprKind::Literal(Literal::Float(v)) => Value::F(vec![*v]),
+        ExprKind::Literal(Literal::Int(v)) => Value::F(vec![*v as f32]),
+        ExprKind::Literal(Literal::Bool(v)) => Value::B(vec![*v]),
+        ExprKind::Var(Root::Local(id)) => locals[*id].clone().expect("a set local"),
+        ExprKind::Var(Root::Global(g)) => {
+            let name = &m.globals[*g].name;
+            let v = inputs.iter().find(|(n, _)| n == name);
+            Value::F(vec![v.unwrap_or_else(|| panic!("no input `{name}`")).1])
+        }
+        ExprKind::Convert(x) => ev(x),
+        ExprKind::Splat(x) => {
+            let n = usize::from(e.ty.size().expect("a vector"));
+            match ev(x) {
+                Value::F(v) => Value::F(vec![v[0]; n]),
+                Value::B(v) => Value::B(vec![v[0]; n]),
+                Value::M(_) => panic!("a matrix splat"),
+            }
+        }
+        ExprKind::Construct(parts) => {
+            let flat: Vec<f32> = parts
+                .iter()
+                .flat_map(|p| match ev(p) {
+                    Value::M(cols) => cols.concat(),
+                    v => v.f().to_vec(),
+                })
+                .collect();
+            match e.ty {
+                Type::Matrix { cols, .. } => Value::M(
+                    flat.chunks(usize::from(cols))
+                        .map(<[f32]>::to_vec)
+                        .collect(),
+                ),
+                _ => Value::F(flat),
+            }
+        }
+        ExprKind::Index(x, i) => {
+            let i = ev(i).f()[0] as usize;
+            match ev(x) {
+                Value::M(cols) => Value::F(cols[i].clone()),
+                v => Value::F(vec![v.f()[i]]),
+            }
+        }
+        ExprKind::Swizzle(x, c) => {
+            let v = ev(x);
+            Value::F(c.iter().map(|&i| v.f()[usize::from(i)]).collect())
+        }
+        ExprKind::Unary(UnaryOp::Neg, x) => Value::F(ev(x).f().iter().map(|v| -v).collect()),
+        ExprKind::Select {
+            cond,
+            accept,
+            reject,
+        } => {
+            let (c, a, r) = (ev(cond), ev(accept), ev(reject));
+            let pick = |i: usize| {
+                if c.b()[i.min(c.b().len() - 1)] {
+                    a.f()[i]
+                } else {
+                    r.f()[i]
+                }
+            };
+            Value::F((0..a.f().len()).map(pick).collect())
+        }
+        ExprKind::Binary(Op::MatMul, a, b) => match (ev(a), ev(b)) {
+            (Value::M(cols), Value::F(v)) => Value::F(
+                (0..cols[0].len())
+                    .map(|r| cols.iter().zip(&v).map(|(c, x)| c[r] * x).sum())
+                    .collect(),
+            ),
+            (Value::F(v), Value::M(cols)) => Value::F(
+                cols.iter()
+                    .map(|c| c.iter().zip(&v).map(|(x, y)| x * y).sum())
+                    .collect(),
+            ),
+            (Value::M(l), Value::M(r)) => Value::M(
+                r.iter()
+                    .map(|rc| {
+                        (0..l[0].len())
+                            .map(|i| l.iter().zip(rc).map(|(c, x)| c[i] * x).sum())
+                            .collect()
+                    })
+                    .collect(),
+            ),
+            other => panic!("a product of {other:?}"),
+        },
+        ExprKind::Binary(op, a, b) => match (op, ev(a), ev(b)) {
+            (Op::Or, Value::B(a), Value::B(b)) => {
+                Value::B(a.iter().zip(&b).map(|(x, y)| *x || *y).collect())
+            }
+            (Op::Mul, Value::M(cols), s) => Value::M(
+                cols.iter()
+                    .map(|c| c.iter().map(|x| x * s.f()[0]).collect())
+                    .collect(),
+            ),
+            (op, a, b) => {
+                let (a, b) = (a.f(), b.f());
+                match op {
+                    Op::Add => zip(a, b, |x, y| x + y),
+                    Op::Sub => zip(a, b, |x, y| x - y),
+                    Op::Mul => zip(a, b, |x, y| x * y),
+                    Op::Div => zip(a, b, |x, y| x / y),
+                    Op::Eq => Value::B(a.iter().zip(b).map(|(x, y)| x == y).collect()),
+                    Op::Gt => Value::B(a.iter().zip(b).map(|(x, y)| x > y).collect()),
+                    other => panic!("the operator {other:?}"),
+                }
+            }
+        },
+        ExprKind::Builtin("dot", args) => {
+            let (a, b) = (ev(&args[0]), ev(&args[1]));
+            Value::F(vec![a.f().iter().zip(b.f()).map(|(x, y)| x * y).sum()])
+        }
+        ExprKind::Builtin("abs", args) => {
+            Value::F(ev(&args[0]).f().iter().map(|x| x.abs()).collect())
+        }
+        ExprKind::Builtin("normalize", args) => {
+            let v = ev(&args[0]);
+            let len = v.f().iter().map(|x| x * x).sum::<f32>().sqrt();
+            Value::F(v.f().iter().map(|x| x / len).collect())
+        }
+        other => panic!("the expression {other:?}"),
+    }
+}
+
+/// Runs the entry point of `src` on the CPU with IEEE `f32` math, with the float
+/// uniforms in `inputs`, and returns the components it returns.
+fn evaluate(src: &str, dialect: &Dialect, inputs: &[(&str, f32)]) -> Vec<f32> {
+    let parsed = wgslift_syntax::parse("t.hlsl", src, Default::default());
+    assert!(!parsed.has_errors(), "{:?}", parsed.diagnostics);
+    let settings = Settings {
+        stage: Stage::Fragment,
+        entry_point: "main",
+        dialect,
+    };
+    let mut d = Vec::new();
+    let m = analyze(&[parsed.unit], &settings, &mut d).unwrap_or_else(|| panic!("{d:?}"));
+    let f = &m.functions[m.entry];
+    let mut locals = vec![None; f.locals.len()];
+    for stmt in &f.body {
+        match stmt {
+            Stmt::Local { id, init: Some(e) } => locals[*id] = Some(eval(e, &m, &locals, inputs)),
+            Stmt::Assign(place, e) if place.path.is_empty() => {
+                let Root::Local(id) = place.root else {
+                    panic!("a store to a global")
+                };
+                locals[id] = Some(eval(e, &m, &locals, inputs));
+            }
+            Stmt::Return(Some(e)) => return eval(e, &m, &locals, inputs).f().to_vec(),
+            other => panic!("the statement {other:?}"),
+        }
+    }
+    panic!("no return")
+}
+
+fn legacy(src: &str, inputs: &[(&str, f32)]) -> Vec<f32> {
+    evaluate(src, &Dialect::d3d9_legacy(), inputs)
+}
+
+#[test]
+fn the_legacy_dialect_multiplies_zero_by_infinity_to_zero() {
+    let src = "float rad1; float q27;\nfloat main() : COLOR { return .4 / rad1 * q27; }";
+    assert_eq!(legacy(src, &[("rad1", 0.0), ("q27", 0.0)]), [0.0]);
+    assert_eq!(legacy(src, &[("rad1", 0.5), ("q27", 2.0)]), [1.6]);
+}
+
+#[test]
+fn the_legacy_dialect_divides_zero_by_zero_to_zero() {
+    let src = "float q12; float q13;\nfloat2 main() : COLOR { return float2(q12, 1) / q13; }";
+    assert_eq!(
+        legacy(src, &[("q12", 0.0), ("q13", 0.0)]),
+        [0.0, f32::INFINITY]
+    );
+    let src = "float q12; float q13;\nfloat main() : COLOR { float x = q12; x /= q13; return x; }";
+    assert_eq!(legacy(src, &[("q12", 0.0), ("q13", 0.0)]), [0.0]);
+    let src = "float q1; float q2;\nfloat main() : COLOR { return (1 / q1) / (1 / q2); }";
+    assert_eq!(legacy(src, &[("q1", 0.0), ("q2", 0.0)]), [0.0]);
+    assert_eq!(legacy(src, &[("q1", 2.0), ("q2", 0.5)]), [0.25]);
+}

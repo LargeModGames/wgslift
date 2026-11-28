@@ -44,6 +44,10 @@ pub struct Dialect {
     /// `pow`, `log`, `log2`, `log10`, `sqrt` and `rsqrt` use the absolute value of
     /// their input, as the Direct3D 9 instructions do.
     pub abs_domain_math: bool,
+    /// 0 times anything is 0, infinity and NaN included, in products, quotients,
+    /// `dot`, `normalize` and `mul`, as Direct3D 9 hardware multiplies. A quotient
+    /// is `a * rcp(b)`, as fxc compiles it.
+    pub legacy_multiply: bool,
     /// Global variables that the shader writes become private variables.
     pub writable_globals: bool,
     /// A variable that a `for` initializer declares stays visible after the loop.
@@ -57,6 +61,7 @@ impl Dialect {
     pub fn d3d9_legacy() -> Dialect {
         Dialect {
             abs_domain_math: true,
+            legacy_multiply: true,
             writable_globals: true,
             for_init_outer_scope: true,
             uniformity: Uniformity::DirectiveOff,
