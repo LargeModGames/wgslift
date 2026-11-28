@@ -59,3 +59,16 @@ fn without_a_loop_limit_no_budget_is_printed() {
     );
     assert!(!output.wgsl.contains("loop_budget"), "{}", output.wgsl);
 }
+
+#[test]
+fn legacy_products_print_valid_wgsl() {
+    let source = "float q1; float2 v; float3x2 m;
+    static const float2 k = float2(0, -1);
+    float4 main(float2 uv : TEXCOORD0) : COLOR0 {
+        float2x2 r = float2x2(q1, uv, q1) * q1;
+        float3 n = normalize(float3(uv / q1, q1));
+        return float4(mul(m, v).xy / k + mul(r, v) + mul(v, r) + uv * q1 / v, dot(n, q1), n.x);
+    }";
+    let output = translate_ok(source, Options::default());
+    assert!(output.wgsl.contains("select("), "{}", output.wgsl);
+}

@@ -312,9 +312,9 @@ fn mul(cx: &mut dyn Lowerer, args: Vec<IntrinsicArg>, span: Span) -> Option<Expr
         [Some(Shape::Vector(1)), Some(_)] | [Some(_), Some(Shape::Vector(1))] => {
             let (shape, scalar) = common(cx, "mul", &args, Elem::Number, span)?;
             let values = fit(cx, args, shape, scalar);
-            return Some(apply(cx, shape, scalar, values, &mut |_, mut p, ty| {
+            return Some(apply(cx, shape, scalar, values, &mut |cx, mut p, _| {
                 let y = p.pop().unwrap();
-                binary(BinaryOp::Mul, p.pop().unwrap(), y, ty.clone())
+                product(cx, p.pop().unwrap(), y)
             }));
         }
         [Some(a), Some(b)] => (a, b),
@@ -335,23 +335,48 @@ fn mul(cx: &mut dyn Lowerer, args: Vec<IntrinsicArg>, span: Span) -> Option<Expr
     let (x, y) = (args.next().unwrap(), args.next().unwrap());
     let float = |n| Type::Vector(Scalar::Float, n);
     let matrix = |rows, cols| Type::Matrix { rows, cols };
+    let legacy = cx.dialect().legacy_multiply;
     Some(match (a, b) {
         (Shape::Vector(n), Shape::Matrix(rows, cols)) => {
             let k = n.min(rows);
             let v = cx.coerce(x.value, &float(k), x.span);
             let m = cx.coerce(y.value, &matrix(k, cols), y.span);
+            if legacy {
+                let (m, v) = (repeat(cx, m), repeat(cx, v));
+                return Some(columns_times(cx, &m, &v, k, cols));
+            }
             binary(BinaryOp::MatMul, m, v, float(cols))
         }
         (Shape::Matrix(rows, cols), Shape::Vector(n)) => {
             let k = n.min(cols);
             let m = cx.coerce(x.value, &matrix(rows, k), x.span);
             let v = cx.coerce(y.value, &float(k), y.span);
+            if legacy {
+                let (m, v) = (repeat(cx, m), repeat(cx, v));
+                let dots = (0..rows)
+                    .map(|c| dot_of(cx, v.clone(), column(m.clone(), c, k)))
+                    .collect();
+                return Some(Expr {
+                    kind: ExprKind::Construct(dots),
+                    ty: float(rows),
+                });
+            }
             binary(BinaryOp::MatMul, v, m, float(rows))
         }
         (Shape::Matrix(rows, k1), Shape::Matrix(k2, cols)) => {
             let k = k1.min(k2);
             let l = cx.coerce(x.value, &matrix(rows, k), x.span);
             let r = cx.coerce(y.value, &matrix(k, cols), y.span);
+            if legacy {
+                let (l, r) = (repeat(cx, l), repeat(cx, r));
+                let columns = (0..rows)
+                    .map(|c| columns_times(cx, &r, &column(l.clone(), c, k), k, cols))
+                    .collect();
+                return Some(Expr {
+                    kind: ExprKind::Construct(columns),
+                    ty: matrix(rows, cols),
+                });
+            }
             binary(BinaryOp::MatMul, r, l, matrix(rows, cols))
         }
         (Shape::Vector(_), Shape::Vector(_)) => unreachable!("handled as a dot product"),
@@ -359,14 +384,13 @@ fn mul(cx: &mut dyn Lowerer, args: Vec<IntrinsicArg>, span: Span) -> Option<Expr
 }
 
 fn dot(cx: &mut dyn Lowerer, args: Vec<IntrinsicArg>, span: Span) -> Option<Expr> {
-    let (size, scalar, mut values) = vectors(cx, "dot", args, Elem::Number, true, span)?;
-    let ty = Type::Scalar(scalar);
+    let (size, _, mut values) = vectors(cx, "dot", args, Elem::Number, true, span)?;
     let b = values.pop().unwrap();
     let a = values.pop().unwrap();
     Some(if size == 1 {
-        binary(BinaryOp::Mul, a, b, ty)
+        product(cx, a, b)
     } else {
-        call("dot", vec![a, b], ty)
+        dot_of(cx, a, b)
     })
 }
 
@@ -384,12 +408,24 @@ fn geometric(
         "normalize" => ("normalize", false),
         _ => ("reflect", false),
     };
-    let (size, scalar, values) = vectors(cx, name, args, Elem::Float, to_scalar, span)?;
+    let (size, scalar, mut values) = vectors(cx, name, args, Elem::Float, to_scalar, span)?;
     let ty = if to_scalar {
         Type::FLOAT
     } else {
         Type::vector(scalar, size)
     };
+    if wgsl == "normalize" && cx.dialect().legacy_multiply {
+        // `x * rsqrt(dot(x, x))`, where the zero components of `x` stay 0.
+        let x = repeat(cx, values.pop().unwrap());
+        let zero = splat(zero(Scalar::Float), &ty);
+        let is_zero = binary(
+            BinaryOp::Eq,
+            x.clone(),
+            zero.clone(),
+            ty.with_scalar(Scalar::Bool),
+        );
+        return Some(select(is_zero, zero, call(wgsl, vec![x], ty)));
+    }
     Some(call(wgsl, values, ty))
 }
 
@@ -853,6 +889,30 @@ pub(crate) fn quotient(cx: &mut dyn Lowerer, a: Expr, b: Expr) -> Expr {
     select(either, zero, binary(BinaryOp::Div, a, b, ty))
 }
 
+/// `dot(a, b)` for two vectors of one type, with the products of `product`.
+fn dot_of(cx: &mut dyn Lowerer, a: Expr, b: Expr) -> Expr {
+    let ty = Type::Scalar(a.ty.scalar().unwrap_or(Scalar::Float));
+    if a == b || !legacy_product(cx, &a, &b) {
+        return call("dot", vec![a, b], ty);
+    }
+    let ones = splat(Expr::float(1.0), &a.ty);
+    let products = product(cx, a, b);
+    call("dot", vec![products, ones], ty)
+}
+
+/// The WGSL product `m * v` with the products of `product`: the sum of the first
+/// `count` columns of `m`, each `len` long, times the components of `v`.
+fn columns_times(cx: &mut dyn Lowerer, m: &Expr, v: &Expr, count: u8, len: u8) -> Expr {
+    let ty = Type::Vector(Scalar::Float, len);
+    (0..count)
+        .map(|c| {
+            let x = splat(swizzle(v.clone(), vec![c], Type::FLOAT), &ty);
+            product(cx, column(m.clone(), c, len), x)
+        })
+        .reduce(|sum, p| binary(BinaryOp::Add, sum, p, ty.clone()))
+        .expect("a matrix has columns")
+}
+
 /// Wraps the first part in `abs()`.
 fn abs_first(parts: &mut [Expr]) {
     let first = parts[0].clone();
@@ -969,6 +1029,7 @@ mod tests {
         fn modern() -> Mock {
             let mut cx = Mock::legacy();
             cx.dialect.abs_domain_math = false;
+            cx.dialect.legacy_multiply = false;
             cx
         }
     }
@@ -1419,7 +1480,7 @@ mod tests {
 
     #[test]
     fn geometric_intrinsics_have_their_result_types() {
-        let mut cx = Mock::legacy();
+        let mut cx = Mock::modern();
         let (a, b) = (local(0, float(3)), local(1, float(3)));
         let one = || vec![a.clone()];
         let two = || vec![a.clone(), b.clone()];
@@ -1553,7 +1614,7 @@ mod tests {
 
     #[test]
     fn mul_with_a_scalar_is_a_product() {
-        let mut cx = Mock::legacy();
+        let mut cx = Mock::modern();
         let (s, t) = (local(0, Type::FLOAT), local(1, Type::FLOAT));
         assert_eq!(
             done(&mut cx, "mul", vec![s.clone(), t.clone()]),
@@ -1577,7 +1638,7 @@ mod tests {
 
     #[test]
     fn mul_of_two_vectors_is_a_dot_product() {
-        let mut cx = Mock::legacy();
+        let mut cx = Mock::modern();
         let (a, b) = (local(0, float(4)), local(1, float(4)));
         let expected = call("dot", vec![a.clone(), b.clone()], Type::FLOAT);
         assert_eq!(done(&mut cx, "mul", vec![a, b]), expected);
@@ -1585,7 +1646,7 @@ mod tests {
 
     #[test]
     fn mul_with_matrices_swaps_the_wgsl_operands() {
-        let mut cx = Mock::legacy();
+        let mut cx = Mock::modern();
         let v = local(0, float(4));
         let m = local(1, mat(4, 3));
         let expected = binary(BinaryOp::MatMul, m.clone(), v.clone(), float(3));
@@ -1601,7 +1662,7 @@ mod tests {
 
     #[test]
     fn mul_truncates_a_long_vector_or_a_large_matrix() {
-        let mut cx = Mock::legacy();
+        let mut cx = Mock::modern();
         let v = local(0, float(4));
         let m = local(1, mat(3, 3));
         let xyz = swizzle(v.clone(), vec![0, 1, 2], float(3));

@@ -862,3 +862,38 @@ fn the_legacy_dialect_divides_zero_by_zero_to_zero() {
     assert_eq!(legacy(src, &[("q1", 0.0), ("q2", 0.0)]), [0.0]);
     assert_eq!(legacy(src, &[("q1", 2.0), ("q2", 0.5)]), [0.25]);
 }
+
+#[test]
+fn the_legacy_dialect_keeps_zero_products_in_dot_and_normalize() {
+    let src = "float q1; float q2;
+        float main() : COLOR { return dot(float2(1 / q1, 1), float2(q2, 3)); }";
+    assert_eq!(legacy(src, &[("q1", 0.0), ("q2", 0.0)]), [3.0]);
+    let src = "float q1;\nfloat3 main() : COLOR { return normalize(float3(q1, 0, 0)); }";
+    assert_eq!(legacy(src, &[("q1", 0.0)]), [0.0, 0.0, 0.0]);
+    assert_eq!(legacy(src, &[("q1", 2.0)]), [1.0, 0.0, 0.0]);
+}
+
+#[test]
+fn the_legacy_dialect_keeps_zero_products_in_matrix_products() {
+    let src = "float q1; float q7;\nfloat2 main() : COLOR {
+        float2x2 rot = float2x2(q1, 0, 0, q1);
+        return mul(float2(1, 1) / q7, rot);
+    }";
+    assert_eq!(legacy(src, &[("q1", 0.0), ("q7", 0.0)]), [0.0, 0.0]);
+}
+
+#[test]
+fn legacy_matrix_products_match_ieee_ones_on_finite_values() {
+    let mut ieee = Dialect::d3d9_legacy();
+    ieee.legacy_multiply = false;
+    let src = "float a; float b; float c; float d;\nfloat4 main() : COLOR {
+        float2x3 m = float2x3(a, b, c, d, a - b, 2);
+        float3x2 n = float3x2(c, 1, d, a, b, -3);
+        float2x2 p = mul(m, n) * a;
+        return float4(mul(float2(a, d), m).xy, mul(m, float3(b, c, d))) + float4(p[0], p[1]);
+    }";
+    let inputs = [("a", 1.5), ("b", -2.0), ("c", 0.25), ("d", 3.0)];
+    let expected = evaluate(src, &ieee, &inputs);
+    assert_eq!(expected, [2.0625, 4.125, 8.125, 4.25]);
+    assert_eq!(legacy(src, &inputs), expected);
+}
