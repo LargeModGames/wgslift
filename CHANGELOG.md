@@ -6,6 +6,10 @@ on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project us
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-28
+
+`wgslift-syntax` has no changes in this release. It keeps the version of the workspace.
+
 ### Fixed
 
 - `wgslift`: `Dialect::d3d9_legacy` multiplies as Direct3D 9 hardware does: 0 times
@@ -57,5 +61,6 @@ on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project us
 - The `milkdrop_translate` example translates every shader in a folder of MilkDrop
   presets and checks the WGSL with naga and, with `--tint`, with Tint.
 
-[Unreleased]: https://github.com/LargeModGames/wgslift/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/LargeModGames/wgslift/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/LargeModGames/wgslift/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/LargeModGames/wgslift/releases/tag/v0.1.0
